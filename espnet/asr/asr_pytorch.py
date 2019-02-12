@@ -472,3 +472,70 @@ def recog(args):
     # TODO(watanabe) fix character coding problems when saving it
     with open(args.result_label, 'wb') as f:
         f.write(json.dumps({'utts': new_js}, indent=4, sort_keys=True).encode('utf_8'))
+
+
+def encode(args):
+    '''Get ASR encoded representations...probably for xvectors'''
+    # seed setting
+    torch.manual_seed(args.seed)
+
+    # read training config
+    idim, odim, train_args = get_model_conf(args.model, args.model_conf)
+
+    # load trained model parameters
+    logging.info('reading model parameters from ' + args.model)
+    e2e = E2E(idim, odim, train_args)
+    model = Loss(e2e, train_args.mtlalpha)
+    if train_args.rnnlm is not None:
+        # set rnnlm. external rnnlm is used for recognition.
+        model.predictor.rnnlm = rnnlm
+    torch_load(args.model, model)
+    e2e.recog_args = args
+
+    # gpu
+    if args.ngpu == 1:
+        gpu_id = range(args.ngpu)
+        logging.info('gpu id: ' + str(gpu_id))
+        model.cuda()
+
+    # read json data
+    with open(args.recog_json, 'rb') as f:
+        js = json.load(f)['utts']
+    new_js = {}
+
+    if args.batchsize == 0:
+        with torch.no_grad():
+            for idx, name in enumerate(js.keys(), 1):
+                logging.info('(%d/%d) decoding ' + name, idx, len(js.keys()))
+                feat = kaldi_io_py.read_mat(js[name]['input'][0]['feat'])
+                rep = e2e.erep(feat)
+                new_js[name] = add_results_to_json(js[name], nbest_hyps, train_args.char_list)
+    else:
+        try:
+            from itertools import zip_longest as zip_longest
+        except Exception:
+            from itertools import izip_longest as zip_longest
+
+        def grouper(n, iterable, fillvalue=None):
+            kargs = [iter(iterable)] * n
+            return zip_longest(*kargs, fillvalue=fillvalue)
+
+        # sort data
+        keys = list(js.keys())
+        feat_lens = [js[key]['input'][0]['shape'][0] for key in keys]
+        sorted_index = sorted(range(len(feat_lens)), key=lambda i: -feat_lens[i])
+        keys = [keys[i] for i in sorted_index]
+
+        with torch.no_grad():
+            for names in grouper(args.batchsize, keys, None):
+                names = [name for name in names if name]
+                feats = [kaldi_io_py.read_mat(js[name]['input'][0]['feat'])
+                         for name in names]
+                nbest_hyps = e2e.erep_batch(feats)
+                for i, nbest_hyp in enumerate(nbest_hyps):
+                    name = names[i]
+                    new_js[name] = add_results_to_json(js[name], nbest_hyp, train_args.char_list)
+
+    # TODO(watanabe) fix character coding problems when saving it
+    with open(args.result_label, 'wb') as f:
+        f.write(json.dumps({'utts': new_js}, indent=4, sort_keys=True).encode('utf_8'))

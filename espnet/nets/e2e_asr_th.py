@@ -518,6 +518,50 @@ class E2E(torch.nn.Module):
             self.train()
         return y
 
+    def erep(self, x):
+        '''E2E encode the input to get intermediate representation
+
+        :param ndarray x: input acouctic feature (T, D)
+        :rtype: list
+        '''
+        prev = self.training
+        self.eval()
+        # subsample frame
+        x = x[::self.subsample[0], :]
+        ilen = [x.shape[0]]
+        h = to_cuda(self, torch.from_numpy(
+            np.array(x, dtype=np.float32)))
+
+        # 1. encoder
+        # make a utt list (1) to use the same interface for encoder
+        h = h.contiguous()
+        h, _ = self.enc(h.unsqueeze(0), ilen)
+        if prev:
+            self.train()
+        return h
+
+    def erep_batch(self, xs):
+        '''E2E ASR encoded rep. batch
+
+        :param ndarray x: input acouctic feature (T, D)
+        :rtype: list
+        '''
+        prev = self.training
+        self.eval()
+        # subsample frame
+        xs = [xx[::self.subsample[0], :] for xx in xs]
+        ilens = np.fromiter((xx.shape[0] for xx in xs), dtype=np.int64)
+        hs = [to_cuda(self, torch.from_numpy(np.array(xx, dtype=np.float32)))
+              for xx in xs]
+
+        # 1. encoder
+        xpad = pad_list(hs, 0.0)
+        hpad, hlens = self.enc(xpad, ilens)
+
+        if prev:
+            self.train()
+        return hpad
+
     def calculate_all_attentions(self, xs_pad, ilens, ys_pad):
         '''E2E attention calculation
 

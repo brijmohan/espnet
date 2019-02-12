@@ -8,12 +8,12 @@
 
 # general configuration
 backend=pytorch
-stage=-1       # start from -1 if you need to start from data download
+stage=5       # start from -1 if you need to start from data download
 ngpu=0         # number of gpus ("0" uses cpu, otherwise use gpu)
 debugmode=1
 dumpdir=dump   # directory to dump full features
 N=0            # number of minibatches to be used (mainly for debugging). "0" uses all minibatches.
-verbose=0      # verbose option
+verbose=1      # verbose option
 resume=        # Resume the training from snapshot
 
 # feature configuration
@@ -72,7 +72,7 @@ samp_prob=0.0
 # Set this to somewhere where you want to put your data, or where
 # someone else has already put it.  You'll want to change this
 # if you're not on the CLSP grid.
-datadir=/export/a15/vpanayotov/data
+datadir=/home/bsrivast/asr_data
 
 # base url for downloads.
 data_url=www.openslr.org/resources/12
@@ -279,7 +279,7 @@ fi
 
 if [ ${stage} -le 5 ]; then
     echo "stage 5: Decoding"
-    nj=32
+    nj=10
 
     for rtask in ${recog_set}; do
     (
