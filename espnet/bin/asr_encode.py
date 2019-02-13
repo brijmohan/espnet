@@ -31,10 +31,10 @@ def main():
     parser.add_argument('--batchsize', default=1, type=int,
                         help='Batch size for beam search (0: means no batch processing)')
     # task related
-    parser.add_argument('--recog-json', type=str,
-                        help='Filename of recognition data (json)')
-    parser.add_argument('--result-label', type=str, required=True,
-                        help='Filename of result label data (json)')
+    parser.add_argument('--feats-in', type=str,
+                        help='feats.scp input')
+    parser.add_argument('--feats-out', type=str, required=True,
+                        help='partial filename of scp and ark to be written')
     # model (parameter) related
     parser.add_argument('--model', type=str, required=True,
                         help='Model file parameters to read')

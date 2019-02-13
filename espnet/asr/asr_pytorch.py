@@ -498,18 +498,18 @@ def encode(args):
         logging.info('gpu id: ' + str(gpu_id))
         model.cuda()
 
-    # read json data
-    with open(args.recog_json, 'rb') as f:
-        js = json.load(f)['utts']
-    new_js = {}
+    arkscp = 'ark:| copy-feats --print-args=false ark:- ark,scp:%s.ark,%s.scp' % (args.feats_out, args.feats_out)
 
     if args.batchsize == 0:
         with torch.no_grad():
-            for idx, name in enumerate(js.keys(), 1):
-                logging.info('(%d/%d) decoding ' + name, idx, len(js.keys()))
-                feat = kaldi_io_py.read_mat(js[name]['input'][0]['feat'])
-                rep = e2e.erep(feat)
-                new_js[name] = add_results_to_json(js[name], nbest_hyps, train_args.char_list)
+            with kaldi_io_py.open_or_fd(arkscp, 'wb') as f, open(args.feats_in, 'rb') as f2:
+                for idx, line in enumerate(f2.read().splitlines(), 1):
+                    line = line.strip().split()
+                    name = line[0]
+                    logging.info('(%d/%d) decoding ' + name, idx)
+                    feat = kaldi_io_py.read_mat(line[1])
+                    rep = e2e.erep(feat)
+                    kaldi_io_py.write_mat(f, rep, name)
     else:
         try:
             from itertools import zip_longest as zip_longest
@@ -536,6 +536,3 @@ def encode(args):
                     name = names[i]
                     new_js[name] = add_results_to_json(js[name], nbest_hyp, train_args.char_list)
 
-    # TODO(watanabe) fix character coding problems when saving it
-    with open(args.result_label, 'wb') as f:
-        f.write(json.dumps({'utts': new_js}, indent=4, sort_keys=True).encode('utf_8'))
