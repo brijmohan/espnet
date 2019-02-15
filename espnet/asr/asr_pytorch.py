@@ -503,12 +503,14 @@ def encode(args):
     if args.batchsize == 0:
         with torch.no_grad():
             with kaldi_io_py.open_or_fd(arkscp, 'wb') as f, open(args.feats_in, 'rb') as f2:
-                for idx, line in enumerate(f2.read().splitlines(), 1):
+                lines = f2.read().splitlines()
+                for idx, line in enumerate(lines, 1):
                     line = line.strip().split()
                     name = line[0]
-                    logging.info('(%d/%d) decoding ' + name, idx)
+                    logging.info('(%d/%d) decoding ' + name, idx, len(lines))
                     feat = kaldi_io_py.read_mat(line[1])
                     rep = e2e.erep(feat)
+                    logging.info('Rep shape: %s', rep.shape)
                     kaldi_io_py.write_mat(f, rep, name)
     else:
         try:
@@ -520,19 +522,34 @@ def encode(args):
             kargs = [iter(iterable)] * n
             return zip_longest(*kargs, fillvalue=fillvalue)
 
+        # Create json object for batch processing
+        logging.info("Creating json for batch processing...")
+        js = {}
+        with open(args.feats_in, 'rb') as f:
+            lines = f.read().splitlines()
+            for line in lines:
+                line = line.strip().split()
+                name = line[0]
+                featpath = line[1]
+                feat_shape = kaldi_io_py.read_mat(featpath).shape
+                js[name] = { 'feat': featpath, 'shape': feat_shape }
+
         # sort data
+        logging.info("Sorting data for batch processing...")
         keys = list(js.keys())
-        feat_lens = [js[key]['input'][0]['shape'][0] for key in keys]
+        feat_lens = [js[key]['shape'][0] for key in keys]
         sorted_index = sorted(range(len(feat_lens)), key=lambda i: -feat_lens[i])
         keys = [keys[i] for i in sorted_index]
 
         with torch.no_grad():
-            for names in grouper(args.batchsize, keys, None):
-                names = [name for name in names if name]
-                feats = [kaldi_io_py.read_mat(js[name]['input'][0]['feat'])
-                         for name in names]
-                nbest_hyps = e2e.erep_batch(feats)
-                for i, nbest_hyp in enumerate(nbest_hyps):
-                    name = names[i]
-                    new_js[name] = add_results_to_json(js[name], nbest_hyp, train_args.char_list)
+            with kaldi_io_py.open_or_fd(arkscp, 'wb') as f:
+                for names in grouper(args.batchsize, keys, None):
+                    names = [name for name in names if name]
+                    feats = [kaldi_io_py.read_mat(js[name]['feat'])
+                             for name in names]
+                    reps, replens = e2e.erep_batch(feats)
+                    print(reps.shape, replens)
+                    for i, rep in enumerate(reps):
+                        name = names[i]
+                        kaldi_io_py.write_mat(f, rep, name)
 

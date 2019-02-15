@@ -21,6 +21,7 @@ egs/*/*/mfcc
 egs/*/*/stft
 egs/*/*/enhan
 egs/*/*/wav*
+egs/librispeech/asr1/RIRS_NOISES
 
 # tools related
 tools/kaldi

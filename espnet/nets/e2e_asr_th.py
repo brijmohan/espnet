@@ -538,7 +538,7 @@ class E2E(torch.nn.Module):
         h, _ = self.enc(h.unsqueeze(0), ilen)
         if prev:
             self.train()
-        return h
+        return h.squeeze(0).cpu().data.numpy()
 
     def erep_batch(self, xs):
         '''E2E ASR encoded rep. batch
@@ -560,7 +560,7 @@ class E2E(torch.nn.Module):
 
         if prev:
             self.train()
-        return hpad
+        return hpad, hlens
 
     def calculate_all_attentions(self, xs_pad, ilens, ys_pad):
         '''E2E attention calculation
