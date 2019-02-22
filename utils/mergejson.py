@@ -19,6 +19,8 @@ if __name__ == '__main__':
                         help='Test the json file for multiple input/output', default=0)
     parser.add_argument('--verbose', '-V', default=0, type=int,
                         help='Verbose option')
+    parser.add_argument('--adv', '-a', default=0, type=int,
+                        help='Adversarial option')
     parser.add_argument('--output-json', default='', type=str,
                         help='output json file')
     args = parser.parse_args()
@@ -71,8 +73,17 @@ if __name__ == '__main__':
         out_dic[unicode('token', 'utf-8')] = dic[unicode('token', 'utf-8')]
         out_dic[unicode('tokenid', 'utf-8')] = dic[unicode('tokenid', 'utf-8')]
 
+        out_dic_arr = [out_dic]
 
-        new_dic[id] = {unicode('input', 'utf-8'):[in_dic], unicode('output', 'utf-8'):[out_dic],
+        if args.adv == 1:
+            out_dic_adv = {}
+            out_dic_adv[unicode('name', 'utf-8')] = unicode('speaker', 'utf-8')
+            out_dic_adv[unicode('shape', 'utf-8')] = (1, int(dic[unicode('spkdim', 'utf-8')]))
+            out_dic_adv[unicode('tokenid', 'utf-8')] = dic[unicode('spkid', 'utf-8')]
+            out_dic_arr.append(out_dic_adv)
+
+
+        new_dic[id] = {unicode('input', 'utf-8'):[in_dic], unicode('output','utf-8'):out_dic_arr,
             unicode('utt2spk', 'utf-8'):dic[unicode('utt2spk', 'utf-8')]}
     
     # ensure "ensure_ascii=False", which is a bug

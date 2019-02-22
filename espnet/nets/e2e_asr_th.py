@@ -32,11 +32,14 @@ from espnet.nets.e2e_asr_common import end_detect
 from espnet.nets.e2e_asr_common import get_vgg2l_odim
 from espnet.nets.e2e_asr_common import label_smoothing_dist
 
+from torch.autograd import Function
 
 CTC_LOSS_THRESHOLD = 10000
 CTC_SCORING_RATIO = 1.5
 MAX_DECODER_OUTPUT = 5
 
+# Gradient reversal alpha
+GRL_ALPHA = 0.5
 
 # ------------- Utility functions --------------------------------------------------------------------------------------
 def to_cuda(m, x):
@@ -163,12 +166,14 @@ def index_select_lm_state(rnnlm_state, dim, vidx):
 
 
 class Reporter(chainer.Chain):
-    def report(self, loss_ctc, loss_att, acc, cer, wer, mtl_loss):
+    def report(self, loss_ctc, loss_att, acc, cer, wer, loss_adv, acc_adv, mtl_loss):
         reporter.report({'loss_ctc': loss_ctc}, self)
         reporter.report({'loss_att': loss_att}, self)
         reporter.report({'acc': acc}, self)
         reporter.report({'cer': cer}, self)
         reporter.report({'wer': wer}, self)
+        reporter.report({'loss_adv': loss_adv}, self)
+        reporter.report({'acc_adv': acc_adv}, self)
         logging.info('mtl loss:' + str(mtl_loss))
         reporter.report({'loss': mtl_loss}, self)
 
@@ -190,7 +195,7 @@ class Loss(torch.nn.Module):
         self.predictor = predictor
         self.reporter = Reporter()
 
-    def forward(self, xs_pad, ilens, ys_pad):
+    def forward(self, xs_pad, ilens, ys_pad, y_adv=None):
         '''Multi-task learning loss forward
 
         :param torch.Tensor xs_pad: batch of padded input sequences (B, Tmax, idim)
@@ -200,7 +205,9 @@ class Loss(torch.nn.Module):
         :rtype: torch.Tensor
         '''
         self.loss = None
-        loss_ctc, loss_att, acc, cer, wer = self.predictor(xs_pad, ilens, ys_pad)
+        loss_ctc, loss_att, acc, cer, wer, loss_adv, acc_adv = self.predictor(xs_pad, ilens,
+                                                                 ys_pad,
+                                                                 y_adv=y_adv)
         alpha = self.mtlalpha
         if alpha == 0:
             self.loss = loss_att
@@ -215,9 +222,14 @@ class Loss(torch.nn.Module):
             loss_att_data = float(loss_att)
             loss_ctc_data = float(loss_ctc)
 
+        if self.predictor.train_adv:
+            self.loss = self.loss + loss_adv
+            loss_adv_data = float(loss_adv.item())
+
         loss_data = float(self.loss)
         if loss_data < CTC_LOSS_THRESHOLD and not math.isnan(loss_data):
-            self.reporter.report(loss_ctc_data, loss_att_data, acc, cer, wer, loss_data)
+            self.reporter.report(loss_ctc_data, loss_att_data, acc, cer, wer,
+                                 loss_adv_data, acc_adv, loss_data)
         else:
             logging.warning('loss (=%f) is not correct', loss_data)
 
@@ -229,10 +241,11 @@ class E2E(torch.nn.Module):
 
     :param int idim: dimension of inputs
     :param int odim: dimension of outputs
+    :param int odim_adv: dimension of outputs for adversarial class
     :param namespace args: argument namespace containing options
     """
 
-    def __init__(self, idim, odim, args):
+    def __init__(self, idim, odim, args, odim_adv=None):
         super(E2E, self).__init__()
         self.etype = args.etype
         self.verbose = args.verbose
@@ -314,6 +327,15 @@ class E2E(torch.nn.Module):
                            self.sos, self.eos, self.att, self.verbose, self.char_list,
                            labeldist, args.lsm_weight, args.sampling_probability)
 
+
+        # Adversarial branch
+        if args.adv:
+            self.train_adv = True
+            self.adv = SpeakerAdv(odim_adv, args.eprojs, args.adv_units,
+                                  args.adv_layers, args.dropout_rate)
+        else:
+            self.train_adv = False
+
         # weight initialization
         self.init_like_chainer()
 
@@ -380,7 +402,7 @@ class E2E(torch.nn.Module):
         for l in six.moves.range(len(self.dec.decoder)):
             set_forget_bias_to_one(self.dec.decoder[l].bias_ih)
 
-    def forward(self, xs_pad, ilens, ys_pad):
+    def forward(self, xs_pad, ilens, ys_pad, y_adv=None):
         '''E2E forward
 
         :param torch.Tensor xs_pad: batch of padded input sequences (B, Tmax, idim)
@@ -408,6 +430,12 @@ class E2E(torch.nn.Module):
             acc = None
         else:
             loss_att, acc = self.dec(hs_pad, hlens, ys_pad)
+
+        # 4. Adversarial loss
+        if self.train_adv:
+            logging.info("Computing adversarial loss")
+            #rev_hs_pad = ReverseLayerF.apply(hs_pad, GRL_ALPHA)
+            loss_adv, acc_adv = self.adv(hs_pad, y_adv)
 
         # 5. compute cer/wer
         if self.training or not (self.report_cer or self.report_wer):
@@ -444,7 +472,7 @@ class E2E(torch.nn.Module):
             wer = 0.0 if not self.report_wer else sum(wers) / len(wers)
             cer = 0.0 if not self.report_cer else sum(cers) / len(cers)
 
-        return loss_ctc, loss_att, acc, cer, wer
+        return loss_ctc, loss_att, acc, cer, wer, loss_adv, acc_adv
 
     def recognize(self, x, recog_args, char_list, rnnlm=None):
         '''E2E beam search
@@ -581,6 +609,83 @@ class E2E(torch.nn.Module):
             att_ws = self.dec.calculate_all_attentions(hpad, hlens, ys_pad)
 
         return att_ws
+
+
+
+#-------------------- Adversarial Network ------------------------------------
+#Brij: Added the gradient reversal layer
+class ReverseLayerF(Function):
+
+    @staticmethod
+    def forward(ctx, x, alpha):
+        ctx.alpha = alpha
+
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        output = grad_output.neg() * ctx.alpha
+
+        return output, None
+
+# Brij: Added to classify speakers from encoder projections
+class SpeakerAdv(torch.nn.Module):
+    """ Speaker adversarial module
+
+    :param int odim: dimension of outputs
+    :param int eprojs: number of encoder projection units
+    :param float dropout_rate: dropout rate (0.0 ~ 1.0)
+    """
+
+    def __init__(self, odim, eprojs, advunits, advlayers, dropout_rate):
+        super(SpeakerAdv, self).__init__()
+        self.advunits = advunits
+        self.advlayers = advlayers
+        self.advnet = torch.nn.LSTM(eprojs, advunits, self.advlayers,
+                                    batch_first=True, dropout=dropout_rate)
+        self.output = torch.nn.Linear(advunits, odim)
+
+    def zero_state(self, hs_pad):
+        return hs_pad.new_zeros(self.advlayers, hs_pad.size(0), self.advunits)
+
+    def forward(self, hs_pad, y_adv):
+        '''Adversarial branch forward
+
+        :param torch.Tensor hs_pad: batch of padded hidden state sequences (B, Tmax, D)
+        :param torch.Tensor hlens: batch of lengths of hidden state sequences (B)
+        :param torch.Tensor y_adv: batch of speaker class (B, #Speakers)
+        :return: loss value
+        :rtype: torch.Tensor
+        :return: accuracy
+        :rtype: float
+        '''
+
+        # initialization
+        logging.info("initializing hidden states for LSTM")
+        h_0 = self.zero_state(hs_pad)
+        c_0 = self.zero_state(hs_pad)
+
+        logging.info("Paasing encoder output through advnet %s",
+                     str(hs_pad.shape))
+
+        self.advnet.flatten_parameters()
+        out_x, (h_0, c_0) = self.advnet(hs_pad, (h_0, c_0))
+
+        logging.info("target size = %s", str(y_adv.shape))
+        y_hat = self.output(out_x)
+        y_hat = torch.mean(y_hat, 1)
+        logging.info("output size = %s", str(y_hat.shape))
+        h_0.detach_()
+        c_0.detach_()
+
+        loss = F.cross_entropy(y_hat, y_adv.squeeze(), size_average=False)
+        logging.info("Adversarial loss = %f", loss.item())
+        acc = th_accuracy(y_hat, y_adv, -1)
+        logging.info("Adversarial accuracy = %f", acc)
+
+        return loss, acc
+
+
 
 
 # ------------- CTC Network --------------------------------------------------------------------------------------------

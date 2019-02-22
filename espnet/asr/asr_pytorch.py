@@ -148,7 +148,7 @@ class CustomConverter(object):
     def __call__(self, batch, device):
         # batch should be located in list
         assert len(batch) == 1
-        xs, ys = batch[0]
+        xs, ys, y_adv = batch[0]
 
         # perform subsamping
         if self.subsamping_factor > 1:
@@ -161,8 +161,9 @@ class CustomConverter(object):
         xs_pad = pad_list([torch.from_numpy(x).float() for x in xs], 0).to(device)
         ilens = torch.from_numpy(ilens).to(device)
         ys_pad = pad_list([torch.from_numpy(y).long() for y in ys], self.ignore_id).to(device)
+        y_adv_pad = pad_list([torch.from_numpy(y).long() for y in y_adv], 0).to(device)
 
-        return xs_pad, ilens, ys_pad
+        return xs_pad, ilens, ys_pad, y_adv_pad
 
 
 def train(args):
@@ -196,6 +197,10 @@ def train(args):
     odim = int(valid_json[utts[0]]['output'][0]['shape'][1])
     logging.info('#input dims : ' + str(idim))
     logging.info('#output dims: ' + str(odim))
+    odim_adv = None
+    if args.adv:
+        odim_adv = int(valid_json[utts[0]]['output'][1]['shape'][1])
+        logging.info('#output dims adversarial: ' + str(odim_adv))
 
     # specify attention, CTC, hybrid mode
     if args.mtlalpha == 1.0:
@@ -209,7 +214,7 @@ def train(args):
         logging.info('Multitask learning mode')
 
     # specify model architecture
-    e2e = E2E(idim, odim, args)
+    e2e = E2E(idim, odim, args, odim_adv=odim_adv)
     model = Loss(e2e, args.mtlalpha)
 
     if args.rnnlm is not None:
@@ -226,7 +231,7 @@ def train(args):
     model_conf = args.outdir + '/model.json'
     with open(model_conf, 'wb') as f:
         logging.info('writing a model config file to ' + model_conf)
-        f.write(json.dumps((idim, odim, vars(args)), indent=4, sort_keys=True).encode('utf_8'))
+        f.write(json.dumps((idim, odim, odim_adv, vars(args)), indent=4, sort_keys=True).encode('utf_8'))
     for key in sorted(vars(args).keys()):
         logging.info('ARGS: ' + key + ': ' + str(vars(args)[key]))
 
@@ -317,9 +322,14 @@ def train(args):
     # Make a plot for training and validation values
     trainer.extend(extensions.PlotReport(['main/loss', 'validation/main/loss',
                                           'main/loss_ctc', 'validation/main/loss_ctc',
-                                          'main/loss_att', 'validation/main/loss_att'],
+                                          'main/loss_att',
+                                          'validation/main/loss_att',
+                                          'main/loss_adv',
+                                          'validation/main/loss_adv'],
                                          'epoch', file_name='loss.png'))
-    trainer.extend(extensions.PlotReport(['main/acc', 'validation/main/acc'],
+    trainer.extend(extensions.PlotReport(['main/acc', 'validation/main/acc',
+                                          'main/acc_adv',
+                                          'validation/main/acc_adv'],
                                          'epoch', file_name='acc.png'))
 
     # Save best models
@@ -367,6 +377,10 @@ def train(args):
         report_keys.append('validation/main/cer')
     if args.report_wer:
         report_keys.append('validation/main/wer')
+    if args.adv:
+        report_keys.extend(['main/loss_adv', 'main/acc_adv',
+                            'validation/main/loss_adv',
+                            'validation/main/acc_adv'])
     trainer.extend(extensions.PrintReport(
         report_keys), trigger=(REPORT_INTERVAL, 'iteration'))
 

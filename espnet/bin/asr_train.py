@@ -157,6 +157,14 @@ def main():
                         help='Gradient norm threshold to clip')
     parser.add_argument('--num-save-attention', default=3, type=int,
                         help='Number of samples of attention to be saved')
+    # Adversarial related
+    parser.add_argument('--adv', default=0, type=int,
+                        help='To perform speaker adversarial training or not')
+    parser.add_argument('--adv-layers', default=1, type=int,
+                        help='Number of decoder layers')
+    parser.add_argument('--adv-units', default=320, type=int,
+                        help='Number of decoder hidden units')
+
     args = parser.parse_args()
 
     # logging info
