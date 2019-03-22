@@ -11,7 +11,7 @@ feat="" # feat.scp
 oov="<unk>"
 bpecode=""
 verbose=0
-adv=0
+adv="none"
 spkid=""
 
 . utils/parse_options.sh
@@ -63,7 +63,7 @@ cat ${feat} > ${tmpdir}/feat.scp
 
 
 # adversarial output
-if [ ${adv} -eq 1 ]; then
+if [ "${adv}" != "none" ]; then
     cat ${dir}/utt2spk | utils/sym2int.pl -f 2- ${spkid} > ${tmpdir}/spkid.scp
     spkdim=`tail -n 1 ${spkid} | awk '{print $2}'`
     spkdim=`echo "$spkdim + 1" | bc`
@@ -75,6 +75,7 @@ for x in ${dir}/text ${dir}/utt2spk ${tmpdir}/*.scp; do
     k=`basename ${x} .scp`
     cat ${x} | scp2json.py --key ${k} > ${tmpdir}/${k}.json
 done
+
 mergejson.py --verbose ${verbose} --adv ${adv} ${tmpdir}/*.json
 
 rm -fr ${tmpdir}

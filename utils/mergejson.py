@@ -19,7 +19,7 @@ if __name__ == '__main__':
                         help='Test the json file for multiple input/output', default=0)
     parser.add_argument('--verbose', '-V', default=0, type=int,
                         help='Verbose option')
-    parser.add_argument('--adv', '-a', default=0, type=int,
+    parser.add_argument('--adv', '-a', default='', type=str,
                         help='Adversarial option')
     parser.add_argument('--output-json', default='', type=str,
                         help='output json file')
@@ -75,7 +75,9 @@ if __name__ == '__main__':
 
         out_dic_arr = [out_dic]
 
-        if args.adv == 1:
+        # Hack to check if adv value is string 'none' because it will be a string
+        # for scheduling the experiments.
+        if args.adv != 'none':
             out_dic_adv = {}
             out_dic_adv[unicode('name', 'utf-8')] = unicode('speaker', 'utf-8')
             out_dic_adv[unicode('shape', 'utf-8')] = (1, int(dic[unicode('spkdim', 'utf-8')]))

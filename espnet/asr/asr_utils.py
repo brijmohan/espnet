@@ -393,7 +393,7 @@ def torch_load(path, model):
     del model_state_dict
 
 
-def torch_resume(snapshot_path, trainer):
+def torch_resume(snapshot_path, trainer, weight_sharing=False):
     """Function to resume from snapshot for pytorch
 
     :param str snapshot_path: snapshot file path
@@ -403,8 +403,9 @@ def torch_resume(snapshot_path, trainer):
     snapshot_dict = torch.load(snapshot_path, map_location=lambda storage, loc: storage)
 
     # restore trainer states
-    d = NpzDeserializer(snapshot_dict['trainer'])
-    d.load(trainer)
+    if not weight_sharing:
+        d = NpzDeserializer(snapshot_dict['trainer'])
+        d.load(trainer)
 
     # restore model states
     if hasattr(trainer.updater.model, "model"):
@@ -416,12 +417,25 @@ def torch_resume(snapshot_path, trainer):
     else:
         # (for ASR model)
         if hasattr(trainer.updater.model, "module"):
-            trainer.updater.model.module.load_state_dict(snapshot_dict['model'])
+            # HACK: remove this later
+            #del snapshot_dict['model']['predictor.adv.output.bias']
+            #del snapshot_dict['model']['predictor.adv.output.weight']
+            # HACK: remove this later
+
+            trainer.updater.model.module.load_state_dict(snapshot_dict['model'],
+                                                         strict=not weight_sharing)
         else:
-            trainer.updater.model.load_state_dict(snapshot_dict['model'])
+            # HACK: remove this later
+            #del snapshot_dict['model']['predictor.adv.output.bias']
+            #del snapshot_dict['model']['predictor.adv.output.weight']
+            # HACK: remove this later
+            
+            trainer.updater.model.load_state_dict(snapshot_dict['model'],
+                                                  strict=not weight_sharing)
 
     # retore optimizer states
-    trainer.updater.get_optimizer('main').load_state_dict(snapshot_dict['optimizer'])
+    if not weight_sharing:
+        trainer.updater.get_optimizer('main').load_state_dict(snapshot_dict['optimizer'])
 
     # delete opened snapshot
     del snapshot_dict

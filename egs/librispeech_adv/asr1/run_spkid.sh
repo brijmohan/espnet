@@ -14,49 +14,22 @@ debugmode=1
 dumpdir=dump   # directory to dump full features
 N=0            # number of minibatches to be used (mainly for debugging). "0" uses all minibatches.
 verbose=1      # verbose option
-resume="~/asr_tools/espnet/egs/librispeech_adv/asr1/exp/train_100_pytorch_vggblstm_e5_subsample1_2_2_1_1_unit1024_proj1024_d2_unit1024_location_aconvc10_aconvf100_mtlalpha0.5_adadelta_sampprob0.0_bs10_mli800_mlo150_advspk30/results/snapshot.ep.19"        # Resume the training from snapshot
+#resume="~/asr_tools/espnet/egs/librispeech_adv/asr1/exp/train_100_pytorch_vggblstm_e5_subsample1_2_2_1_1_unit1024_proj1024_d2_unit1024_location_aconvc10_aconvf100_mtlalpha0.5_adadelta_sampprob0.0_bs10_mli800_mlo150_advspk30/results/snapshot.ep.19"        # Resume the training from snapshot
+resume=
 weight_sharing=true           # Resume with weight sharing means that only available weights will be applied to the given model otherwise if it is false then a snapshot is resumed normally.
 
 # feature configuration
 do_delta=false
 
 # network architecture
-# encoder related
-etype=vggblstm     # encoder architecture type
-elayers=5
-eunits=1024
-eprojs=1024
-subsample=1_2_2_1_1 # skip every n frame from input to nth layers
-# decoder related
-dlayers=2
-dunits=1024
-# attention related
-atype=location
-adim=1024
-aconv_chans=10
-aconv_filts=100
-
-# hybrid CTC/attention
-mtlalpha=0.5
-
 # minibatch related
-batchsize=10
+batchsize=20
 maxlen_in=800  # if input length  > maxlen_in, batchsize is automatically reduced
 maxlen_out=150 # if output length > maxlen_out, batchsize is automatically reduced
 
 # optimization related
 opt=adadelta
 epochs=30
-
-# rnnlm related
-lm_layers=1
-lm_units=1024
-lm_opt=sgd        # or adam
-lm_batchsize=1024 # batch size in LM training
-lm_epochs=20      # if the data size is large, we can reduce this
-lm_maxlen=40      # if sentence length > lm_maxlen, lm_batchsize is automatically reduced
-lm_resume=        # specify a snapshot file to resume LM training
-lmtag=            # tag for managing LMs
 
 # decoding parameter
 lm_weight=0.7
@@ -83,7 +56,7 @@ nbpe=5000
 bpemode=unigram
 
 # exp tag
-tag="" # tag for managing experiments.
+tag="spkid_over_fbank" # tag for managing experiments.
 
 # Adversarial experiment options
 # adv_mode can be spk, asr, adv
@@ -212,52 +185,8 @@ if [ ${stage} -le 2 ]; then
 fi
 
 
-# You can skip this and remove --rnnlm option in the recognition (stage 5)
-if [ -z ${lmtag} ]; then
-    lmtag=${lm_layers}layer_unit${lm_units}_${lm_opt}_bs${lm_batchsize}
-fi
-lmexpdir=exp/train_rnnlm_${backend}_${lmtag}_${bpemode}${nbpe}
-mkdir -p ${lmexpdir}
-: '
-if [ ${stage} -le 3 ]; then
-    echo "stage 3: LM Preparation"
-    lmdatadir=data/local/lm_train_${bpemode}${nbpe}
-    mkdir -p ${lmdatadir}
-    # use external data
-    if [ ! -e data/local/lm_train/librispeech-lm-norm.txt.gz ]; then
-        wget http://www.openslr.org/resources/11/librispeech-lm-norm.txt.gz -P data/local/lm_train/
-    fi
-    cut -f 2- -d" " data/${train_set}/text | gzip -c > data/local/lm_train/${train_set}_text.gz
-    # combine external text and transcriptions and shuffle them with seed 777
-    zcat data/local/lm_train/librispeech-lm-norm.txt.gz data/local/lm_train/${train_set}_text.gz |\
-	spm_encode --model=${bpemodel}.model --output_format=piece > ${lmdatadir}/train.txt
-    cut -f 2- -d" " data/${train_dev}/text | spm_encode --model=${bpemodel}.model --output_format=piece \
-							> ${lmdatadir}/valid.txt
-    # use only 1 gpu
-    if [ ${ngpu} -gt 1 ]; then
-        echo "LM training does not support multi-gpu. signle gpu will be used."
-    fi
-    ${cuda_cmd} --gpu ${ngpu} ${lmexpdir}/train.log \
-        lm_train.py \
-        --ngpu ${ngpu} \
-        --backend ${backend} \
-        --verbose 1 \
-        --outdir ${lmexpdir} \
-        --train-label ${lmdatadir}/train.txt \
-        --valid-label ${lmdatadir}/valid.txt \
-        --resume ${lm_resume} \
-        --layer ${lm_layers} \
-        --unit ${lm_units} \
-        --opt ${lm_opt} \
-        --batchsize ${lm_batchsize} \
-        --epoch ${lm_epochs} \
-        --maxlen ${lm_maxlen} \
-        --dict ${dict}
-fi
-'
-
 if [ -z ${tag} ]; then
-    expdir=exp/${train_set}_${backend}_${etype}_e${elayers}_subsample${subsample}_unit${eunits}_proj${eprojs}_d${dlayers}_unit${dunits}_${atype}_aconvc${aconv_chans}_aconvf${aconv_filts}_mtlalpha${mtlalpha}_${opt}_sampprob${samp_prob}_bs${batchsize}_mli${maxlen_in}_mlo${maxlen_out}_adv${adv_mode}
+    expdir=exp/${train_set}_${backend}_${opt}_bs${batchsize}_spkid
     if ${do_delta}; then
         expdir=${expdir}_delta
     fi
@@ -269,12 +198,11 @@ mkdir -p ${expdir}
 if [ ${stage} -le 4 ]; then
     echo "stage 4: Network Training"
     ${cuda_cmd} --gpu ${ngpu} ${expdir}/train.log \
-        asr_train.py \
+        spkid_train.py \
         --ngpu ${ngpu} \
         --backend ${backend} \
         --outdir ${expdir}/results \
         --debugmode ${debugmode} \
-        --dict ${dict} \
         --debugdir ${expdir} \
         --minibatches ${N} \
         --verbose ${verbose} \
@@ -282,22 +210,9 @@ if [ ${stage} -le 4 ]; then
 	--weight-sharing \
         --train-json ${feat_tr_dir}/split_utt_spk/data_${bpemode}${nbpe}.train.json \
         --valid-json ${feat_tr_dir}/split_utt_spk/data_${bpemode}${nbpe}.dev.json \
-        --etype ${etype} \
-        --elayers ${elayers} \
-        --eunits ${eunits} \
-        --eprojs ${eprojs} \
-        --subsample ${subsample} \
-        --dlayers ${dlayers} \
-        --dunits ${dunits} \
-        --atype ${atype} \
-        --adim ${adim} \
-        --aconv-chans ${aconv_chans} \
-        --aconv-filts ${aconv_filts} \
-        --mtlalpha ${mtlalpha} \
         --batch-size ${batchsize} \
         --maxlen-in ${maxlen_in} \
         --maxlen-out ${maxlen_out} \
-        --sampling-probability ${samp_prob} \
         --opt ${opt} \
         --epochs ${epochs} \
 	--adv ${adv_mode} \

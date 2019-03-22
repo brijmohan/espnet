@@ -24,7 +24,6 @@ import torch
 
 # espnet related
 from espnet.asr.asr_utils import adadelta_eps_decay
-from espnet.asr.asr_utils import add_results_to_json
 from espnet.asr.asr_utils import CompareValueTrigger
 from espnet.asr.asr_utils import get_model_conf
 from espnet.asr.asr_utils import load_inputs_and_targets
@@ -35,16 +34,12 @@ from espnet.asr.asr_utils import torch_load
 from espnet.asr.asr_utils import torch_resume
 from espnet.asr.asr_utils import torch_save
 from espnet.asr.asr_utils import torch_snapshot
-from espnet.nets.e2e_asr_th import E2E
-from espnet.nets.e2e_asr_th import Loss
-from espnet.nets.e2e_asr_th import pad_list
+from espnet.nets.e2e_spkid_th import E2E
+from espnet.nets.e2e_spkid_th import Loss
+from espnet.nets.e2e_spkid_th import pad_list
 
 # for kaldi io
 import kaldi_io_py
-
-# rnnlm
-import espnet.lm.extlm_pytorch as extlm_pytorch
-import espnet.lm.lm_pytorch as lm_pytorch
 
 # matplotlib related
 import matplotlib
@@ -54,26 +49,27 @@ matplotlib.use('Agg')
 REPORT_INTERVAL = 100
 
 
-def get_alpha_number(s):
-    m = re.search(r'\d+$', s)
-    m1 = int(m.group()) if m else None
-    t = re.search(r'^[a-z]+', s)
-    t1 = t.group() if t else None
-    return (t1, m1)
+from collections import Counter
 
-def get_advsched(advstr, nepochs):
-    advsched = {}
-    sp = [get_alpha_number(x) for x in advstr.split(',')]
-    assert sum([x[1] for x in sp]) == nepochs, "Sum of schedule segment != nepochs"
-    ecnt = 0
-    for m, t in sp:
-        for i in range(t):
-            advsched[ecnt] = m
-            ecnt += 1
+def add_results_to_json(js, spk_preds):
+    """Function to add N-best results to json
 
-    # Hack to prevent KeyError in last epoch, add last mode
-    advsched[ecnt] = sp[-1][0]
-    return advsched
+    :param dict js: groundtruth utterance dict
+    :param list nbest_hyps: list of hypothesis
+    :param list char_list: list of characters
+    :return: N-best results added utterance dict
+    """
+    # copy old json info
+    new_js = dict()
+    new_js['utt2spk'] = js['utt2spk']
+
+    new_js['label'] = js['output'][1]
+    new_js['pred'] = {'all': spk_preds}
+
+    count = Counter(spk_preds)
+    new_js['pred']['most_common'] = count.most_common()[0][0]
+
+    return new_js
 
 
 class CustomEvaluator(extensions.Evaluator):
@@ -120,14 +116,13 @@ class CustomUpdater(training.StandardUpdater):
     '''Custom updater for pytorch'''
 
     def __init__(self, model, grad_clip_threshold, train_iter,
-                 optimizer, converter, device, ngpu, adv_schedule=None):
+                 optimizer, converter, device, ngpu):
         super(CustomUpdater, self).__init__(train_iter, optimizer)
         self.model = model
         self.grad_clip_threshold = grad_clip_threshold
         self.converter = converter
         self.device = device
         self.ngpu = ngpu
-        self.adv_schedule = adv_schedule
 
     # The core part of the update routine can be customized by overriding.
     def update_core(self):
@@ -140,21 +135,9 @@ class CustomUpdater(training.StandardUpdater):
         batch = train_iter.next()
         x = self.converter(batch, self.device)
 
-        adv_mode = self.adv_schedule[int(self.epoch_detail)]
-        logging.info("Epoch detail = %f, Adv mode = %s", self.epoch_detail,
-                     adv_mode)
+        logging.info("Epoch detail = %f", self.epoch_detail)
 
-        loss_asr, loss_adv = self.model(*x)
-
-        if adv_mode == 'spk':
-            self.model.module.predictor.freeze_encoder()
-            loss = loss_adv
-        elif adv_mode == 'asr':
-            self.model.module.predictor.unfreeze_encoder()
-            loss = loss_asr
-        else:
-            self.model.module.predictor.unfreeze_encoder()
-            loss = loss_asr + loss_adv
+        loss = self.model(*x)
 
         # Compute the loss at this time step and accumulate it
         optimizer.zero_grad()  # Clear the parameter gradients
@@ -164,8 +147,6 @@ class CustomUpdater(training.StandardUpdater):
         else:
             loss.backward()  # Backprop
         loss.detach_()  # Truncate the graph
-        loss_asr.detach_()
-        loss_adv.detach_()
         # compute the gradient norm to check if it is normal or not
         grad_norm = torch.nn.utils.clip_grad_norm_(
             self.model.parameters(), self.grad_clip_threshold)
@@ -201,10 +182,9 @@ class CustomConverter(object):
         # perform padding and convert to tensor
         xs_pad = pad_list([torch.from_numpy(x).float() for x in xs], 0).to(device)
         ilens = torch.from_numpy(ilens).to(device)
-        ys_pad = pad_list([torch.from_numpy(y).long() for y in ys], self.ignore_id).to(device)
         y_adv_pad = pad_list([torch.from_numpy(y).long() for y in y_adv], 0).to(device)
 
-        return xs_pad, ilens, ys_pad, y_adv_pad
+        return xs_pad, ilens, y_adv_pad
 
 
 def train(args):
@@ -238,33 +218,12 @@ def train(args):
     odim = int(valid_json[utts[0]]['output'][0]['shape'][1])
     logging.info('#input dims : ' + str(idim))
     logging.info('#output dims: ' + str(odim))
-    odim_adv = None
-    if args.adv:
-        odim_adv = int(valid_json[utts[0]]['output'][1]['shape'][1])
-        logging.info('#output dims adversarial: ' + str(odim_adv))
-
-    # specify attention, CTC, hybrid mode
-    if args.mtlalpha == 1.0:
-        mtl_mode = 'ctc'
-        logging.info('Pure CTC mode')
-    elif args.mtlalpha == 0.0:
-        mtl_mode = 'att'
-        logging.info('Pure attention mode')
-    else:
-        mtl_mode = 'mtl'
-        logging.info('Multitask learning mode')
+    odim_adv = int(valid_json[utts[0]]['output'][1]['shape'][1])
+    logging.info('#output dims adversarial: ' + str(odim_adv))
 
     # specify model architecture
-    e2e = E2E(idim, odim, args, odim_adv=odim_adv)
-    model = Loss(e2e, args.mtlalpha)
-
-    if args.rnnlm is not None:
-        rnnlm_args = get_model_conf(args.rnnlm, args.rnnlm_conf)
-        rnnlm = lm_pytorch.ClassifierWithState(
-            lm_pytorch.RNNLM(
-                len(args.char_list), rnnlm_args.layer, rnnlm_args.unit))
-        torch_load(args.rnnlm, rnnlm)
-        e2e.rnnlm = rnnlm
+    e2e = E2E(idim, odim_adv, args)
+    model = Loss(e2e)
 
     # write model config
     if not os.path.exists(args.outdir):
@@ -301,7 +260,7 @@ def train(args):
     setattr(optimizer, "serialize", lambda s: reporter.serialize(s))
 
     # Setup a converter
-    converter = CustomConverter(e2e.subsample[0])
+    converter = CustomConverter()
 
     # read json data
     with open(args.train_json, 'rb') as f:
@@ -334,14 +293,10 @@ def train(args):
             TransformDataset(valid, converter.transform),
             batch_size=1, repeat=False, shuffle=False)
 
-
-    # Prepare adversarial training schedule dictionary
-    adv_schedule = get_advsched(args.adv, args.epochs)
-
     # Set up a trainer
     updater = CustomUpdater(
         model, args.grad_clip, train_iter, optimizer, converter, device,
-        args.ngpu, adv_schedule=adv_schedule)
+        args.ngpu)
     trainer = training.Trainer(
         updater, (args.epochs, 'epoch'), out=args.outdir)
 
@@ -353,78 +308,53 @@ def train(args):
     # Evaluate the model with the test dataset for each epoch
     trainer.extend(CustomEvaluator(model, valid_iter, reporter, converter, device))
 
-    # Save attention weight each epoch
-    if args.num_save_attention > 0 and args.mtlalpha != 1.0:
-        data = sorted(list(valid_json.items())[:args.num_save_attention],
-                      key=lambda x: int(x[1]['input'][0]['shape'][1]), reverse=True)
-        if hasattr(model, "module"):
-            att_vis_fn = model.module.predictor.calculate_all_attentions
-        else:
-            att_vis_fn = model.predictor.calculate_all_attentions
-        trainer.extend(PlotAttentionReport(
-            att_vis_fn, data, args.outdir + "/att_ws",
-            converter=converter, device=device), trigger=(1, 'epoch'))
-
     # Make a plot for training and validation values
-    trainer.extend(extensions.PlotReport(['main/loss', 'validation/main/loss',
-                                          'main/loss_ctc', 'validation/main/loss_ctc',
-                                          'main/loss_att',
-                                          'validation/main/loss_att',
-                                          'main/loss_adv',
+    trainer.extend(extensions.PlotReport(['main/loss_adv',
                                           'validation/main/loss_adv'],
                                          'epoch', file_name='loss.png'))
-    trainer.extend(extensions.PlotReport(['main/acc', 'validation/main/acc',
-                                          'main/acc_adv',
+    trainer.extend(extensions.PlotReport(['main/acc_adv',
                                           'validation/main/acc_adv'],
                                          'epoch', file_name='acc.png'))
 
     # Save best models
     trainer.extend(extensions.snapshot_object(model, 'model.loss.best', savefun=torch_save),
-                   trigger=training.triggers.MinValueTrigger('validation/main/loss'))
-    if mtl_mode is not 'ctc':
-        trainer.extend(extensions.snapshot_object(model, 'model.acc.best', savefun=torch_save),
-                       trigger=training.triggers.MaxValueTrigger('validation/main/acc'))
+                   trigger=training.triggers.MinValueTrigger('validation/main/loss_adv'))
+    trainer.extend(extensions.snapshot_object(model, 'model.acc.best', savefun=torch_save),
+                       trigger=training.triggers.MaxValueTrigger('validation/main/acc_adv'))
 
     # save snapshot which contains model and optimizer states
     trainer.extend(torch_snapshot(), trigger=(1, 'epoch'))
 
     # epsilon decay in the optimizer
     if args.opt == 'adadelta':
-        if args.criterion == 'acc' and mtl_mode is not 'ctc':
+        if args.criterion == 'acc':
             trainer.extend(restore_snapshot(model, args.outdir + '/model.acc.best', load_fn=torch_load),
                            trigger=CompareValueTrigger(
-                               'validation/main/acc',
+                               'validation/main/acc_adv',
                                lambda best_value, current_value: best_value > current_value))
             trainer.extend(adadelta_eps_decay(args.eps_decay),
                            trigger=CompareValueTrigger(
-                               'validation/main/acc',
+                               'validation/main/acc_adv',
                                lambda best_value, current_value: best_value > current_value))
         elif args.criterion == 'loss':
             trainer.extend(restore_snapshot(model, args.outdir + '/model.loss.best', load_fn=torch_load),
                            trigger=CompareValueTrigger(
-                               'validation/main/loss',
+                               'validation/main/loss_adv',
                                lambda best_value, current_value: best_value < current_value))
             trainer.extend(adadelta_eps_decay(args.eps_decay),
                            trigger=CompareValueTrigger(
-                               'validation/main/loss',
+                               'validation/main/loss_adv',
                                lambda best_value, current_value: best_value < current_value))
 
     # Write a log of evaluation statistics for each epoch
     trainer.extend(extensions.LogReport(trigger=(REPORT_INTERVAL, 'iteration')))
-    report_keys = ['epoch', 'iteration', 'main/loss', 'main/loss_ctc', 'main/loss_att',
-                   'validation/main/loss', 'validation/main/loss_ctc', 'validation/main/loss_att',
-                   'main/acc', 'validation/main/acc', 'elapsed_time']
+    report_keys = ['epoch', 'iteration', 'elapsed_time']
     if args.opt == 'adadelta':
         trainer.extend(extensions.observe_value(
             'eps', lambda trainer: trainer.updater.get_optimizer('main').param_groups[0]["eps"]),
             trigger=(REPORT_INTERVAL, 'iteration'))
         report_keys.append('eps')
-    if args.report_cer:
-        report_keys.append('validation/main/cer')
-    if args.report_wer:
-        report_keys.append('validation/main/wer')
-    if args.adv:
-        report_keys.extend(['main/loss_adv', 'main/acc_adv',
+    report_keys.extend(['main/loss_adv', 'main/acc_adv',
                             'validation/main/loss_adv',
                             'validation/main/acc_adv'])
     trainer.extend(extensions.PrintReport(
@@ -444,42 +374,11 @@ def recog(args):
     # read training config
     idim, odim, odim_adv, train_args = get_model_conf(args.model, args.model_conf)
 
-    # read rnnlm
-    if args.rnnlm:
-        rnnlm_args = get_model_conf(args.rnnlm, args.rnnlm_conf)
-        rnnlm = lm_pytorch.ClassifierWithState(
-            lm_pytorch.RNNLM(
-                len(train_args.char_list), rnnlm_args.layer, rnnlm_args.unit))
-        torch_load(args.rnnlm, rnnlm)
-        rnnlm.eval()
-    else:
-        rnnlm = None
-
-    if args.word_rnnlm:
-        rnnlm_args = get_model_conf(args.word_rnnlm, args.word_rnnlm_conf)
-        word_dict = rnnlm_args.char_list_dict
-        char_dict = {x: i for i, x in enumerate(train_args.char_list)}
-        word_rnnlm = lm_pytorch.ClassifierWithState(lm_pytorch.RNNLM(
-            len(word_dict), rnnlm_args.layer, rnnlm_args.unit))
-        torch_load(args.word_rnnlm, word_rnnlm)
-        word_rnnlm.eval()
-
-        if rnnlm is not None:
-            rnnlm = lm_pytorch.ClassifierWithState(
-                extlm_pytorch.MultiLevelLM(word_rnnlm.predictor,
-                                           rnnlm.predictor, word_dict, char_dict))
-        else:
-            rnnlm = lm_pytorch.ClassifierWithState(
-                extlm_pytorch.LookAheadWordLM(word_rnnlm.predictor,
-                                              word_dict, char_dict))
 
     # load trained model parameters
     logging.info('reading model parameters from ' + args.model)
-    e2e = E2E(idim, odim, train_args, odim_adv=odim_adv)
-    model = Loss(e2e, train_args.mtlalpha)
-    if train_args.rnnlm is not None:
-        # set rnnlm. external rnnlm is used for recognition.
-        model.predictor.rnnlm = rnnlm
+    e2e = E2E(idim, odim_adv, train_args)
+    model = Loss(e2e)
     torch_load(args.model, model)
     e2e.recog_args = args
 
@@ -488,8 +387,6 @@ def recog(args):
         gpu_id = range(args.ngpu)
         logging.info('gpu id: ' + str(gpu_id))
         model.cuda()
-        if rnnlm:
-            rnnlm.cuda()
 
     # read json data
     with open(args.recog_json, 'rb') as f:
@@ -501,8 +398,8 @@ def recog(args):
             for idx, name in enumerate(js.keys(), 1):
                 logging.info('(%d/%d) decoding ' + name, idx, len(js.keys()))
                 feat = kaldi_io_py.read_mat(js[name]['input'][0]['feat'])
-                nbest_hyps = e2e.recognize(feat, args, train_args.char_list, rnnlm)
-                new_js[name] = add_results_to_json(js[name], nbest_hyps, train_args.char_list)
+                nbest_hyps = e2e.recognize(feat)
+                new_js[name] = add_results_to_json(js[name], nbest_hyps)
     else:
         try:
             from itertools import zip_longest as zip_longest
@@ -524,92 +421,12 @@ def recog(args):
                 names = [name for name in names if name]
                 feats = [kaldi_io_py.read_mat(js[name]['input'][0]['feat'])
                          for name in names]
-                nbest_hyps = e2e.recognize_batch(feats, args, train_args.char_list, rnnlm=rnnlm)
+                nbest_hyps = e2e.recognize_batch(feats)
                 for i, nbest_hyp in enumerate(nbest_hyps):
                     name = names[i]
-                    new_js[name] = add_results_to_json(js[name], nbest_hyp, train_args.char_list)
+                    new_js[name] = add_results_to_json(js[name], nbest_hyp)
 
     # TODO(watanabe) fix character coding problems when saving it
     with open(args.result_label, 'wb') as f:
         f.write(json.dumps({'utts': new_js}, indent=4, sort_keys=True).encode('utf_8'))
-
-
-def encode(args):
-    '''Get ASR encoded representations...probably for xvectors'''
-    # seed setting
-    torch.manual_seed(args.seed)
-
-    # read training config
-    idim, odim, train_args = get_model_conf(args.model, args.model_conf)
-
-    # load trained model parameters
-    logging.info('reading model parameters from ' + args.model)
-    e2e = E2E(idim, odim, train_args)
-    model = Loss(e2e, train_args.mtlalpha)
-    if train_args.rnnlm is not None:
-        # set rnnlm. external rnnlm is used for recognition.
-        model.predictor.rnnlm = rnnlm
-    torch_load(args.model, model)
-    e2e.recog_args = args
-
-    # gpu
-    if args.ngpu == 1:
-        gpu_id = range(args.ngpu)
-        logging.info('gpu id: ' + str(gpu_id))
-        model.cuda()
-
-    arkscp = 'ark:| copy-feats --print-args=false ark:- ark,scp:%s.ark,%s.scp' % (args.feats_out, args.feats_out)
-
-    if args.batchsize == 0:
-        with torch.no_grad():
-            with kaldi_io_py.open_or_fd(arkscp, 'wb') as f, open(args.feats_in, 'rb') as f2:
-                lines = f2.read().splitlines()
-                for idx, line in enumerate(lines, 1):
-                    line = line.strip().split()
-                    name = line[0]
-                    logging.info('(%d/%d) decoding ' + name, idx, len(lines))
-                    feat = kaldi_io_py.read_mat(line[1])
-                    rep = e2e.erep(feat)
-                    logging.info('Rep shape: %s', rep.shape)
-                    kaldi_io_py.write_mat(f, rep, name)
-    else:
-        try:
-            from itertools import zip_longest as zip_longest
-        except Exception:
-            from itertools import izip_longest as zip_longest
-
-        def grouper(n, iterable, fillvalue=None):
-            kargs = [iter(iterable)] * n
-            return zip_longest(*kargs, fillvalue=fillvalue)
-
-        # Create json object for batch processing
-        logging.info("Creating json for batch processing...")
-        js = {}
-        with open(args.feats_in, 'rb') as f:
-            lines = f.read().splitlines()
-            for line in lines:
-                line = line.strip().split()
-                name = line[0]
-                featpath = line[1]
-                feat_shape = kaldi_io_py.read_mat(featpath).shape
-                js[name] = { 'feat': featpath, 'shape': feat_shape }
-
-        # sort data
-        logging.info("Sorting data for batch processing...")
-        keys = list(js.keys())
-        feat_lens = [js[key]['shape'][0] for key in keys]
-        sorted_index = sorted(range(len(feat_lens)), key=lambda i: -feat_lens[i])
-        keys = [keys[i] for i in sorted_index]
-
-        with torch.no_grad():
-            with kaldi_io_py.open_or_fd(arkscp, 'wb') as f:
-                for names in grouper(args.batchsize, keys, None):
-                    names = [name for name in names if name]
-                    feats = [kaldi_io_py.read_mat(js[name]['feat'])
-                             for name in names]
-                    reps, replens = e2e.erep_batch(feats)
-                    print(reps.shape, replens)
-                    for i, rep in enumerate(reps):
-                        name = names[i]
-                        kaldi_io_py.write_mat(f, rep, name)
 

@@ -211,19 +211,20 @@ class Loss(torch.nn.Module):
         alpha = self.mtlalpha
         if alpha == 0:
             self.loss = loss_att
-            loss_att_data = float(loss_att)
+            loss_att_data = float(loss_att.item())
             loss_ctc_data = None
         elif alpha == 1:
             self.loss = loss_ctc
             loss_att_data = None
-            loss_ctc_data = float(loss_ctc)
+            loss_ctc_data = float(loss_ctc.item())
         else:
             self.loss = alpha * loss_ctc + (1 - alpha) * loss_att
-            loss_att_data = float(loss_att)
-            loss_ctc_data = float(loss_ctc)
+            loss_att_data = float(loss_att.item())
+            loss_ctc_data = float(loss_ctc.item())
 
+        # Add adversarial loss
         if self.predictor.train_adv:
-            self.loss = self.loss + loss_adv
+            #self.loss = self.loss + loss_adv
             loss_adv_data = float(loss_adv.item())
 
         loss_data = float(self.loss)
@@ -233,7 +234,7 @@ class Loss(torch.nn.Module):
         else:
             logging.warning('loss (=%f) is not correct', loss_data)
 
-        return self.loss
+        return self.loss, loss_adv
 
 
 class E2E(torch.nn.Module):
@@ -252,6 +253,9 @@ class E2E(torch.nn.Module):
         self.char_list = args.char_list
         self.outdir = args.outdir
         self.mtlalpha = args.mtlalpha
+
+        # For training the adverarial branch, encoder must be frozen
+        self.enc_frozen = False
 
         # below means the last number becomes eos/sos ID
         # note that sos/eos IDs are identical
@@ -332,7 +336,7 @@ class E2E(torch.nn.Module):
         if args.adv:
             self.train_adv = True
             self.adv = SpeakerAdv(odim_adv, args.eprojs, args.adv_units,
-                                  args.adv_layers, args.dropout_rate)
+                                  args.adv_layers)
         else:
             self.train_adv = False
 
@@ -402,6 +406,18 @@ class E2E(torch.nn.Module):
         for l in six.moves.range(len(self.dec.decoder)):
             set_forget_bias_to_one(self.dec.decoder[l].bias_ih)
 
+    def freeze_encoder(self):
+        if not self.enc_frozen:
+            for param in self.enc.parameters():
+                param.requires_grad = False
+            self.enc_frozen = True
+
+    def unfreeze_encoder(self):
+        if self.enc_frozen:
+            for param in self.enc.parameters():
+                param.requires_grad = True
+            self.enc_frozen = False
+
     def forward(self, xs_pad, ilens, ys_pad, y_adv=None):
         '''E2E forward
 
@@ -419,23 +435,28 @@ class E2E(torch.nn.Module):
         hs_pad, hlens = self.enc(xs_pad, ilens)
 
         # 2. CTC loss
+        loss_ctc = to_cuda(self, torch.tensor(0.0))
         if self.mtlalpha == 0:
             loss_ctc = None
         else:
-            loss_ctc = self.ctc(hs_pad, hlens, ys_pad)
+            if not self.enc_frozen:
+                loss_ctc = self.ctc(hs_pad, hlens, ys_pad)
 
         # 3. attention loss
+        loss_att = to_cuda(self, torch.tensor(0.0))
+        acc = 0.0
         if self.mtlalpha == 1:
             loss_att = None
             acc = None
         else:
-            loss_att, acc = self.dec(hs_pad, hlens, ys_pad)
+            if not self.enc_frozen:
+                loss_att, acc = self.dec(hs_pad, hlens, ys_pad)
 
         # 4. Adversarial loss
         if self.train_adv:
             logging.info("Computing adversarial loss")
-            #rev_hs_pad = ReverseLayerF.apply(hs_pad, GRL_ALPHA)
-            loss_adv, acc_adv = self.adv(hs_pad, y_adv)
+            rev_hs_pad = ReverseLayerF.apply(hs_pad, GRL_ALPHA)
+            loss_adv, acc_adv = self.adv(rev_hs_pad, hlens, y_adv)
 
         # 5. compute cer/wer
         if self.training or not (self.report_cer or self.report_wer):
@@ -590,7 +611,7 @@ class E2E(torch.nn.Module):
             self.train()
         return hpad, hlens
 
-    def calculate_all_attentions(self, xs_pad, ilens, ys_pad):
+    def calculate_all_attentions(self, xs_pad, ilens, ys_pad, y_adv=None):
         '''E2E attention calculation
 
         :param torch.Tensor xs_pad: batch of padded input sequences (B, Tmax, idim)
@@ -637,18 +658,33 @@ class SpeakerAdv(torch.nn.Module):
     :param float dropout_rate: dropout rate (0.0 ~ 1.0)
     """
 
-    def __init__(self, odim, eprojs, advunits, advlayers, dropout_rate):
+    def __init__(self, odim, eprojs, advunits, advlayers, dropout_rate=0.2):
         super(SpeakerAdv, self).__init__()
         self.advunits = advunits
         self.advlayers = advlayers
-        self.advnet = torch.nn.LSTM(eprojs, advunits, self.advlayers,
-                                    batch_first=True, dropout=dropout_rate)
+        #self.advnet = torch.nn.LSTM(eprojs, advunits, self.advlayers,
+        #                            batch_first=True, dropout=dropout_rate)
+        '''
+        linears = [torch.nn.Linear(eprojs, advunits), torch.nn.ReLU(),
+                   torch.nn.Dropout(p=dropout_rate)]
+        for l in six.moves.range(1, self.advlayers):
+            linears.extend([torch.nn.Linear(advunits, advunits),
+                            torch.nn.ReLU(), torch.nn.Dropout(p=dropout_rate)])
+        self.advnet = torch.nn.Sequential(*linears)
+        '''
+        self.vgg = VGG2L(1)
+        layer_arr = [torch.nn.Linear(get_vgg2l_odim(eprojs, in_channel=1),
+                                          advunits), torch.nn.ReLU()]
+        for l in six.moves.range(1, self.advlayers):
+            layer_arr.extend([torch.nn.Linear(advunits, advunits),
+                            torch.nn.ReLU(), torch.nn.Dropout(p=dropout_rate)])
+        self.advnet = torch.nn.Sequential(*layer_arr)
         self.output = torch.nn.Linear(advunits, odim)
 
     def zero_state(self, hs_pad):
         return hs_pad.new_zeros(self.advlayers, hs_pad.size(0), self.advunits)
 
-    def forward(self, hs_pad, y_adv):
+    def forward(self, hs_pad, hlens, y_adv):
         '''Adversarial branch forward
 
         :param torch.Tensor hs_pad: batch of padded hidden state sequences (B, Tmax, D)
@@ -661,26 +697,46 @@ class SpeakerAdv(torch.nn.Module):
         '''
 
         # initialization
-        logging.info("initializing hidden states for LSTM")
-        h_0 = self.zero_state(hs_pad)
-        c_0 = self.zero_state(hs_pad)
+        #logging.info("initializing hidden states for LSTM")
+        #h_0 = self.zero_state(hs_pad)
+        #c_0 = self.zero_state(hs_pad)
 
-        logging.info("Paasing encoder output through advnet %s",
+        logging.info("Passing encoder output through advnet %s",
                      str(hs_pad.shape))
 
-        self.advnet.flatten_parameters()
-        out_x, (h_0, c_0) = self.advnet(hs_pad, (h_0, c_0))
+        #self.advnet.flatten_parameters()
+        #out_x, (h_0, c_0) = self.advnet(hs_pad, (h_0, c_0))
+        vgg_x, _ = self.vgg(hs_pad, hlens)
+        out_x = self.advnet(vgg_x)
 
-        logging.info("target size = %s", str(y_adv.shape))
+        logging.info("vgg output size = %s", str(vgg_x.shape))
+        logging.info("advnet output size = %s", str(out_x.shape))
+        logging.info("adversarial target size = %s", str(y_adv.shape))
+        
         y_hat = self.output(out_x)
-        y_hat = torch.mean(y_hat, 1)
-        logging.info("output size = %s", str(y_hat.shape))
-        h_0.detach_()
-        c_0.detach_()
 
-        loss = F.cross_entropy(y_hat, y_adv.squeeze(), size_average=False)
+        # Create labels tensor by replicating speaker label
+        batch_size, avg_seq_len, out_dim = y_hat.size()
+
+        labels = torch.zeros([batch_size, avg_seq_len], dtype=torch.int64)
+        for ix in range(batch_size):
+            labels[ix, :] = y_adv[ix]
+
+        # Mean over sequence length
+        #y_hat = torch.mean(y_hat, 1)
+        #h_0.detach_()
+        #c_0.detach_()
+
+        # Convert tensors to desired shape
+        y_hat = y_hat.view((-1, out_dim))
+        labels = labels.contiguous().view(-1)
+        labels = to_cuda(self, labels.long())
+        logging.info("adversarial output size = %s", str(y_hat.shape))
+        logging.info("artificial label size = %s", str(labels.shape))
+
+        loss = F.cross_entropy(y_hat, labels, size_average=False)
         logging.info("Adversarial loss = %f", loss.item())
-        acc = th_accuracy(y_hat, y_adv, -1)
+        acc = th_accuracy(y_hat, labels.unsqueeze(0), -1)
         logging.info("Adversarial accuracy = %f", acc)
 
         return loss, acc
@@ -2627,7 +2683,7 @@ class Decoder(torch.nn.Module):
 
         return nbest_hyps
 
-    def calculate_all_attentions(self, hs_pad, hlen, ys_pad):
+    def calculate_all_attentions(self, hs_pad, hlen, ys_pad, y_adv=None):
         '''Calculate all of attentions
 
         :param torch.Tensor hs_pad: batch of padded hidden state sequences (B, Tmax, D)
