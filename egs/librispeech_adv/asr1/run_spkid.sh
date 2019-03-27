@@ -28,8 +28,8 @@ maxlen_in=800  # if input length  > maxlen_in, batchsize is automatically reduce
 maxlen_out=150 # if output length > maxlen_out, batchsize is automatically reduced
 
 # optimization related
-#opt=adadelta
-opt=adam
+opt=adadelta
+#opt=adam
 epochs=30
 
 # decoding parameter
@@ -64,13 +64,13 @@ bpemode=unigram
 # It can be combined for scheduling the training in different modes
 # Eg: spk5,asr5,adv5,spk5
 adv_mode="spk30"
-adv_layers=3
-adv_units=256
+adv_layers=2
+adv_units=1024
 
-dropout=0.4
+dropout=0.2
 
 # exp tag
-tag="spkid_over_erepasr_fc${adv_units}_opt${opt}" # tag for managing experiments.
+tag="spkid_over_erepasr_lstm${adv_units}_opt${opt}" # tag for managing experiments.
 
 . utils/parse_options.sh || exit 1;
 
