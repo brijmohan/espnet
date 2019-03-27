@@ -235,6 +235,10 @@ def train(args):
     for key in sorted(vars(args).keys()):
         logging.info('ARGS: ' + key + ': ' + str(vars(args)[key]))
 
+    # Log total number of parameters
+    pytorch_total_params = sum(p.numel() for p in e2e.parameters())
+    logging.info("Total parameters in e2e: " + str(pytorch_total_params))
+
     reporter = model.reporter
 
     # check the use of multi-gpu

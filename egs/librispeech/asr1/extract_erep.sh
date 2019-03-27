@@ -1,8 +1,8 @@
 #!/bin/bash
 
-dataset=train_plda_combined
+dataset=train_100
 
-local/gen_erep.sh --data-in /home/bsrivast/kaldi/egs/librispeech_spkv/v2/data/${dataset} \
-	--data-out /home/bsrivast/kaldi/egs/librispeech_spkv/v2/data/erep_${dataset} \
-	--modeldir exp/pretrained_e2e_train_960 \
-	--erep-dir /home/bsrivast/kaldi/egs/librispeech_spkv/v2/exp_ext/erep_${dataset}
+local/gen_erep.sh --data-in /home/bsrivast/asr_tools/espnet/egs/librispeech_adv/asr1/data/${dataset} \
+	--data-out /home/bsrivast/asr_tools/espnet/egs/librispeech_adv/asr1/data/erep_${dataset} \
+	--modeldir exp/train_960_pytorch_vggblstm_e5_subsample1_2_2_1_1_unit1024_proj1024_d2_unit1024_location_aconvc10_aconvf100_mtlalpha0.5_adadelta_sampprob0.0_bs20_mli800_mlo150/results \
+	--erep-dir /home/bsrivast/asr_tools/espnet/egs/librispeech_adv/asr1/exp/erep_${dataset}

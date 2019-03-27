@@ -1,5 +1,6 @@
 '''
-python json_sur.py <json file> <utt2dur file>
+Get the combined duration of all utterances in the data json file
+python json_dur.py <json file> <utt2dur file>
 '''
 
 import json

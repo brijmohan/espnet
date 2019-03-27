@@ -220,7 +220,8 @@ class E2E(torch.nn.Module):
 
         # Adversarial branch
         self.adv = SpeakerAdv(odim_adv, idim, args.adv_units,
-                                  args.adv_layers)
+                                args.adv_layers,
+                                dropout_rate=args.dropout_rate)
 
         # weight initialization
         self.init_like_chainer()

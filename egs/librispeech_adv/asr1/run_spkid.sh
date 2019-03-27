@@ -23,12 +23,13 @@ do_delta=false
 
 # network architecture
 # minibatch related
-batchsize=20
+batchsize=5
 maxlen_in=800  # if input length  > maxlen_in, batchsize is automatically reduced
 maxlen_out=150 # if output length > maxlen_out, batchsize is automatically reduced
 
 # optimization related
-opt=adadelta
+#opt=adadelta
+opt=adam
 epochs=30
 
 # decoding parameter
@@ -55,9 +56,6 @@ data_url=www.openslr.org/resources/12
 nbpe=5000
 bpemode=unigram
 
-# exp tag
-tag="spkid_over_fbank" # tag for managing experiments.
-
 # Adversarial experiment options
 # adv_mode can be spk, asr, adv
 # spk = train just the speaker branch and freeze the encoder, 
@@ -66,8 +64,13 @@ tag="spkid_over_fbank" # tag for managing experiments.
 # It can be combined for scheduling the training in different modes
 # Eg: spk5,asr5,adv5,spk5
 adv_mode="spk30"
-adv_layers=2
-adv_units=4096
+adv_layers=3
+adv_units=256
+
+dropout=0.4
+
+# exp tag
+tag="spkid_over_erepasr_fc${adv_units}_opt${opt}" # tag for managing experiments.
 
 . utils/parse_options.sh || exit 1;
 
@@ -80,8 +83,8 @@ set -e
 set -u
 set -o pipefail
 
-train_set=train_960
-#train_set=train_100
+#train_set=erep_train_960
+train_set=erep_train_100
 train_dev=dev
 recog_set="test_clean test_other dev_clean dev_other"
 
@@ -184,6 +187,13 @@ if [ ${stage} -le 2 ]; then
     done
 fi
 
+#train_json=data/erep_train_960/json/data_unigram5000.train.json
+#dev_json=data/erep_train_960/json/data_unigram5000.dev.json
+train_json=data/erep_train_100/json/data_unigram5000.train.json
+dev_json=data/erep_train_100/json/data_unigram5000.dev.json
+#train_json=dump/train_100/deltafalse/split_utt_spk/data_unigram5000.train.json
+#dev_json=dump/train_100/deltafalse/split_utt_spk/data_unigram5000.dev.json
+
 
 if [ -z ${tag} ]; then
     expdir=exp/${train_set}_${backend}_${opt}_bs${batchsize}_spkid
@@ -208,8 +218,8 @@ if [ ${stage} -le 4 ]; then
         --verbose ${verbose} \
         --resume ${resume} \
 	--weight-sharing \
-        --train-json ${feat_tr_dir}/split_utt_spk/data_${bpemode}${nbpe}.train.json \
-        --valid-json ${feat_tr_dir}/split_utt_spk/data_${bpemode}${nbpe}.dev.json \
+        --train-json ${train_json} \
+        --valid-json ${dev_json} \
         --batch-size ${batchsize} \
         --maxlen-in ${maxlen_in} \
         --maxlen-out ${maxlen_out} \
@@ -217,7 +227,9 @@ if [ ${stage} -le 4 ]; then
         --epochs ${epochs} \
 	--adv ${adv_mode} \
 	--adv-layers ${adv_layers} \
-	--adv-units ${adv_units}
+	--adv-units ${adv_units} \
+	--dropout-rate ${dropout}
+
 
 fi
 
