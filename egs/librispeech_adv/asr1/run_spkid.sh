@@ -23,12 +23,12 @@ do_delta=false
 
 # network architecture
 # minibatch related
-batchsize=5
+batchsize=10
 maxlen_in=800  # if input length  > maxlen_in, batchsize is automatically reduced
 maxlen_out=150 # if output length > maxlen_out, batchsize is automatically reduced
 
 # optimization related
-opt=adadelta
+opt=adam
 #opt=adam
 epochs=30
 
@@ -64,13 +64,13 @@ bpemode=unigram
 # It can be combined for scheduling the training in different modes
 # Eg: spk5,asr5,adv5,spk5
 adv_mode="spk30"
-adv_layers=2
-adv_units=1024
+adv_layers=4
+adv_units=512
 
 dropout=0.2
 
 # exp tag
-tag="spkid_over_erepasr_lstm${adv_units}_opt${opt}" # tag for managing experiments.
+tag="spkid_over_erepasr_bilstm${adv_units}_opt${opt}_split2" # tag for managing experiments.
 
 . utils/parse_options.sh || exit 1;
 
@@ -189,8 +189,8 @@ fi
 
 #train_json=data/erep_train_960/json/data_unigram5000.train.json
 #dev_json=data/erep_train_960/json/data_unigram5000.dev.json
-train_json=data/erep_train_100/json/data_unigram5000.train.json
-dev_json=data/erep_train_100/json/data_unigram5000.dev.json
+train_json=data/erep_train_100/split_utt_spk/erep_feats.train.json
+dev_json=data/erep_train_100/split_utt_spk/erep_feats.dev.json
 #train_json=dump/train_100/deltafalse/split_utt_spk/data_unigram5000.train.json
 #dev_json=dump/train_100/deltafalse/split_utt_spk/data_unigram5000.dev.json
 

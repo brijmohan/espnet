@@ -1,3 +1,7 @@
+'''
+Copies filterbank json and replaces feats and shape with new erep feats
+'''
+
 import os
 from os.path import exists, join
 

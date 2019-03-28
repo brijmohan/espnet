@@ -14,6 +14,8 @@ import logging
 import os
 import sys
 
+from random import shuffle
+
 import numpy as np
 import itertools
 
@@ -59,6 +61,11 @@ if __name__ == '__main__':
     num_utt = [len(x) for x in spk2utt.values()]
     logging.info("minimum number of utt = %d", min(num_utt))
     logging.info("maximum number of utt = %d", max(num_utt))
+
+    # Randomly shuffle the utterance ids for each speaker
+    for k, v in spk2utt.items():
+        shuffle(v)
+        spk2utt[k] = v
 
     dev_uttids = flatten([x[-args.dev:] for x in spk2utt.values()])
     test_uttids = flatten([x[-args.dev-args.test:-args.dev] for x in spk2utt.values()])
