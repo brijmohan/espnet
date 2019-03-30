@@ -359,6 +359,10 @@ class SpeakerAdv(torch.nn.Module):
         self.advnet = torch.nn.LSTM(eprojs, advunits, self.advlayers,
                                     batch_first=True, dropout=dropout_rate,
                                     bidirectional=True)
+        #self.advnet = LSTM(cell_class=BNLSTMCell, input_size=eprojs, 
+        #                   hidden_size=advunits,
+        #                   batch_first=True, max_length=300,
+        #                   num_layers=advlayers)
         '''
         linears = [torch.nn.Linear(eprojs, advunits), torch.nn.ReLU(),
                    torch.nn.Dropout(p=dropout_rate)]
@@ -377,6 +381,7 @@ class SpeakerAdv(torch.nn.Module):
 
     def zero_state(self, hs_pad):
         return hs_pad.new_zeros(2*self.advlayers, hs_pad.size(0), self.advunits)
+        #return hs_pad.new_zeros(hs_pad.size(0), self.advunits)
 
     def forward(self, hs_pad, hlens, y_adv):
         '''Adversarial branch forward
@@ -399,7 +404,7 @@ class SpeakerAdv(torch.nn.Module):
                      str(hs_pad.shape))
 
         #vgg_x, _ = self.vgg(hs_pad, hlens)
-        self.advnet.flatten_parameters()
+        #self.advnet.flatten_parameters()
         out_x, (h_0, c_0) = self.advnet(hs_pad, (h_0, c_0))
         #vgg_x, _ = self.vgg(hs_pad, hlens)
         #out_x = self.advnet(vgg_x)
@@ -408,6 +413,7 @@ class SpeakerAdv(torch.nn.Module):
         logging.info("advnet output size = %s", str(out_x.shape))
         logging.info("speaker target size = %s", str(y_adv.shape))
         
+        #out_x = out_x.transpose(0, 1)
         y_hat = self.output(out_x)
 
         # Create labels tensor by replicating speaker label

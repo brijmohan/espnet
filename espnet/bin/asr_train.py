@@ -166,6 +166,8 @@ def main():
                         help='Number of decoder layers')
     parser.add_argument('--adv-units', default=320, type=int,
                         help='Number of decoder hidden units')
+    parser.add_argument('--grlalpha', default=0.5, type=float,
+                        help='Gradient reversal layer scale param')
 
     args = parser.parse_args()
 

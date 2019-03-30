@@ -333,10 +333,12 @@ class E2E(torch.nn.Module):
 
 
         # Adversarial branch
+        self.grlalpha = args.grlalpha
         if args.adv:
             self.train_adv = True
             self.adv = SpeakerAdv(odim_adv, args.eprojs, args.adv_units,
-                                  args.adv_layers)
+                                  args.adv_layers,
+                                  dropout_rate=args.dropout_rate)
         else:
             self.train_adv = False
 
@@ -455,7 +457,7 @@ class E2E(torch.nn.Module):
         # 4. Adversarial loss
         if self.train_adv:
             logging.info("Computing adversarial loss")
-            rev_hs_pad = ReverseLayerF.apply(hs_pad, GRL_ALPHA)
+            rev_hs_pad = ReverseLayerF.apply(hs_pad, self.grlalpha)
             loss_adv, acc_adv = self.adv(rev_hs_pad, hlens, y_adv)
 
         # 5. compute cer/wer
@@ -662,8 +664,9 @@ class SpeakerAdv(torch.nn.Module):
         super(SpeakerAdv, self).__init__()
         self.advunits = advunits
         self.advlayers = advlayers
-        #self.advnet = torch.nn.LSTM(eprojs, advunits, self.advlayers,
-        #                            batch_first=True, dropout=dropout_rate)
+        self.advnet = torch.nn.LSTM(eprojs, advunits, self.advlayers,
+                                    batch_first=True, dropout=dropout_rate,
+                                    bidirectional=True)
         '''
         linears = [torch.nn.Linear(eprojs, advunits), torch.nn.ReLU(),
                    torch.nn.Dropout(p=dropout_rate)]
@@ -672,17 +675,17 @@ class SpeakerAdv(torch.nn.Module):
                             torch.nn.ReLU(), torch.nn.Dropout(p=dropout_rate)])
         self.advnet = torch.nn.Sequential(*linears)
         '''
-        self.vgg = VGG2L(1)
-        layer_arr = [torch.nn.Linear(get_vgg2l_odim(eprojs, in_channel=1),
-                                          advunits), torch.nn.ReLU()]
-        for l in six.moves.range(1, self.advlayers):
-            layer_arr.extend([torch.nn.Linear(advunits, advunits),
-                            torch.nn.ReLU(), torch.nn.Dropout(p=dropout_rate)])
-        self.advnet = torch.nn.Sequential(*layer_arr)
-        self.output = torch.nn.Linear(advunits, odim)
+        #self.vgg = VGG2L(1)
+        #layer_arr = [torch.nn.Linear(get_vgg2l_odim(eprojs, in_channel=1),
+        #                                  advunits), torch.nn.ReLU()]
+        #for l in six.moves.range(1, self.advlayers):
+        #    layer_arr.extend([torch.nn.Linear(advunits, advunits),
+        #                    torch.nn.ReLU(), torch.nn.Dropout(p=dropout_rate)])
+        #self.advnet = torch.nn.Sequential(*layer_arr)
+        self.output = torch.nn.Linear(2*advunits, odim)
 
     def zero_state(self, hs_pad):
-        return hs_pad.new_zeros(self.advlayers, hs_pad.size(0), self.advunits)
+        return hs_pad.new_zeros(2*self.advlayers, hs_pad.size(0), self.advunits)
 
     def forward(self, hs_pad, hlens, y_adv):
         '''Adversarial branch forward
@@ -697,19 +700,19 @@ class SpeakerAdv(torch.nn.Module):
         '''
 
         # initialization
-        #logging.info("initializing hidden states for LSTM")
-        #h_0 = self.zero_state(hs_pad)
-        #c_0 = self.zero_state(hs_pad)
+        logging.info("initializing hidden states for LSTM")
+        h_0 = self.zero_state(hs_pad)
+        c_0 = self.zero_state(hs_pad)
 
         logging.info("Passing encoder output through advnet %s",
                      str(hs_pad.shape))
 
-        #self.advnet.flatten_parameters()
-        #out_x, (h_0, c_0) = self.advnet(hs_pad, (h_0, c_0))
-        vgg_x, _ = self.vgg(hs_pad, hlens)
-        out_x = self.advnet(vgg_x)
+        self.advnet.flatten_parameters()
+        out_x, (h_0, c_0) = self.advnet(hs_pad, (h_0, c_0))
+        #vgg_x, _ = self.vgg(hs_pad, hlens)
+        #out_x = self.advnet(vgg_x)
 
-        logging.info("vgg output size = %s", str(vgg_x.shape))
+        #logging.info("vgg output size = %s", str(vgg_x.shape))
         logging.info("advnet output size = %s", str(out_x.shape))
         logging.info("adversarial target size = %s", str(y_adv.shape))
         
@@ -724,8 +727,8 @@ class SpeakerAdv(torch.nn.Module):
 
         # Mean over sequence length
         #y_hat = torch.mean(y_hat, 1)
-        #h_0.detach_()
-        #c_0.detach_()
+        h_0.detach_()
+        c_0.detach_()
 
         # Convert tensors to desired shape
         y_hat = y_hat.view((-1, out_dim))

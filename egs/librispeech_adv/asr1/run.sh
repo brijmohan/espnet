@@ -8,13 +8,13 @@
 
 # general configuration
 backend=pytorch
-stage=4       # start from -1 if you need to start from data download
+stage=1       # start from -1 if you need to start from data download
 ngpu=2         # number of gpus ("0" uses cpu, otherwise use gpu)
 debugmode=1
 dumpdir=dump   # directory to dump full features
 N=0            # number of minibatches to be used (mainly for debugging). "0" uses all minibatches.
 verbose=1      # verbose option
-resume="~/asr_tools/espnet/egs/librispeech_adv/asr1/exp/train_100_pytorch_vggblstm_e5_subsample1_2_2_1_1_unit1024_proj1024_d2_unit1024_location_aconvc10_aconvf100_mtlalpha0.5_adadelta_sampprob0.0_bs10_mli800_mlo150_advspk30/results/snapshot.ep.19"        # Resume the training from snapshot
+resume="~/asr_tools/espnet/egs/librispeech/asr1/exp/train_960_pytorch_vggblstm_e5_subsample1_2_2_1_1_unit1024_proj1024_d2_unit1024_location_aconvc10_aconvf100_mtlalpha0.5_adadelta_sampprob0.0_bs20_mli800_mlo150/results/snapshot.ep.10"        # Resume the training from snapshot
 weight_sharing=true           # Resume with weight sharing means that only available weights will be applied to the given model otherwise if it is false then a snapshot is resumed normally.
 
 # feature configuration
@@ -46,7 +46,7 @@ maxlen_out=150 # if output length > maxlen_out, batchsize is automatically reduc
 
 # optimization related
 opt=adadelta
-epochs=30
+epochs=25
 
 # rnnlm related
 lm_layers=1
@@ -82,9 +82,6 @@ data_url=www.openslr.org/resources/12
 nbpe=5000
 bpemode=unigram
 
-# exp tag
-tag="" # tag for managing experiments.
-
 # Adversarial experiment options
 # adv_mode can be spk, asr, adv
 # spk = train just the speaker branch and freeze the encoder, 
@@ -92,9 +89,13 @@ tag="" # tag for managing experiments.
 # adv = train both the branches and backpropagate adversarial loss
 # It can be combined for scheduling the training in different modes
 # Eg: spk5,asr5,adv5,spk5
-adv_mode="spk30"
-adv_layers=2
-adv_units=4096
+adv_mode="spk10,adv10,spk5"
+adv_layers=3
+adv_units=512
+grlalpha=0.5
+
+# exp tag
+tag="adv_units${adv_units}_layers${adv_layers}_grlalpha${grlalpha}" # tag for managing experiments.
 
 . utils/parse_options.sh || exit 1;
 
@@ -107,8 +108,8 @@ set -e
 set -u
 set -o pipefail
 
-train_set=train_960
-#train_set=train_100
+#train_set=train_960
+train_set=train_100
 train_dev=dev
 recog_set="test_clean test_other dev_clean dev_other"
 
@@ -133,27 +134,35 @@ fi
 
 feat_tr_dir=${dumpdir}/${train_set}/delta${do_delta}; mkdir -p ${feat_tr_dir}
 feat_dt_dir=${dumpdir}/${train_dev}/delta${do_delta}; mkdir -p ${feat_dt_dir}
+cmvn_file=../../librispeech/asr1/data/train_960/cmvn.ark
 if [ ${stage} -le 1 ]; then
     ### Task dependent. You have to design training and dev sets by yourself.
     ### But you can utilize Kaldi recipes in most cases
     echo "stage 1: Feature Generation"
     fbankdir=fbank
     # Generate the fbank features; by default 80-dimensional fbanks with pitch on each frame
-    for x in dev_clean test_clean dev_other test_other train_clean_100 train_clean_360 train_other_500; do
+    : '
+    for x in dev_clean test_clean dev_other test_other train_clean_100; do
+        steps/make_fbank_pitch.sh --cmd "$train_cmd" --nj 32 --write_utt2num_frames true \
+            data/${x} exp/make_fbank/${x} ${fbankdir}
+    done
+    '
+    for x in train_clean_100; do
         steps/make_fbank_pitch.sh --cmd "$train_cmd" --nj 32 --write_utt2num_frames true \
             data/${x} exp/make_fbank/${x} ${fbankdir}
     done
 
-    utils/combine_data.sh --extra_files utt2num_frames data/${train_set}_org data/train_clean_100 data/train_clean_360 data/train_other_500
-    utils/combine_data.sh --extra_files utt2num_frames data/${train_dev}_org data/dev_clean data/dev_other
+    #utils/combine_data.sh --extra_files utt2num_frames data/${train_set}_org data/train_clean_100 data/train_clean_360 data/train_other_500
+    #utils/combine_data.sh --extra_files utt2num_frames data/${train_dev}_org data/dev_clean data/dev_other
 
     # remove utt having more than 3000 frames
     # remove utt having more than 400 characters
-    remove_longshortdata.sh --maxframes 3000 --maxchars 400 data/${train_set}_org data/${train_set}
-    remove_longshortdata.sh --maxframes 3000 --maxchars 400 data/${train_dev}_org data/${train_dev}
+    #remove_longshortdata.sh --maxframes 3000 --maxchars 400 data/${train_set}_org data/${train_set}
+    remove_longshortdata.sh --maxframes 3000 --maxchars 400 data/train_clean_100 data/${train_set}
+    #remove_longshortdata.sh --maxframes 3000 --maxchars 400 data/${train_dev}_org data/${train_dev}
 
     # compute global CMVN
-    compute-cmvn-stats scp:data/${train_set}/feats.scp data/${train_set}/cmvn.ark
+    #compute-cmvn-stats scp:data/${train_set}/feats.scp data/${train_set}/cmvn.ark
 
     # dump features for training
     if [[ $(hostname -f) == *.clsp.jhu.edu ]] && [ ! -d ${feat_tr_dir}/storage ]; then
@@ -167,13 +176,13 @@ if [ ${stage} -le 1 ]; then
         ${feat_dt_dir}/storage
     fi
     dump.sh --cmd "$train_cmd" --nj 40 --do_delta $do_delta \
-        data/${train_set}/feats.scp data/${train_set}/cmvn.ark exp/dump_feats/train ${feat_tr_dir}
+        data/${train_set}/feats.scp ${cmvn_file} exp/dump_feats/train ${feat_tr_dir}
     dump.sh --cmd "$train_cmd" --nj 32 --do_delta $do_delta \
-        data/${train_dev}/feats.scp data/${train_set}/cmvn.ark exp/dump_feats/dev ${feat_dt_dir}
+        data/${train_dev}/feats.scp ${cmvn_file} exp/dump_feats/dev ${feat_dt_dir}
     for rtask in ${recog_set}; do
         feat_recog_dir=${dumpdir}/${rtask}/delta${do_delta}; mkdir -p ${feat_recog_dir}
         dump.sh --cmd "$train_cmd" --nj 32 --do_delta $do_delta \
-            data/${rtask}/feats.scp data/${train_set}/cmvn.ark exp/dump_feats/recog/${rtask} \
+            data/${rtask}/feats.scp ${cmvn_file} exp/dump_feats/recog/${rtask} \
             ${feat_recog_dir}
     done
 fi
@@ -302,12 +311,12 @@ if [ ${stage} -le 4 ]; then
         --epochs ${epochs} \
 	--adv ${adv_mode} \
 	--adv-layers ${adv_layers} \
-	--adv-units ${adv_units}
+	--adv-units ${adv_units} \
+	--grlalpha ${grlalpha}
 
 fi
 
 
-: '
 if [ ${stage} -le 5 ]; then
     echo "stage 5: Decoding"
     nj=10
@@ -351,6 +360,7 @@ if [ ${stage} -le 5 ]; then
 fi
 
 
+: '
 if [ ${stage} -le 6 ]; then
     echo "stage 6: Adversarial decoding"
     nj=10
