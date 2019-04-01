@@ -737,7 +737,7 @@ class SpeakerAdv(torch.nn.Module):
         logging.info("adversarial output size = %s", str(y_hat.shape))
         logging.info("artificial label size = %s", str(labels.shape))
 
-        loss = F.cross_entropy(y_hat, labels, size_average=False)
+        loss = F.cross_entropy(y_hat, labels, size_average=True)
         logging.info("Adversarial loss = %f", loss.item())
         acc = th_accuracy(y_hat, labels.unsqueeze(0), -1)
         logging.info("Adversarial accuracy = %f", acc)
