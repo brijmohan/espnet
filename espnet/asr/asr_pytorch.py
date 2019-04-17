@@ -147,13 +147,23 @@ class CustomUpdater(training.StandardUpdater):
         loss_asr, loss_adv = self.model(*x)
 
         if adv_mode == 'spk':
-            self.model.module.predictor.freeze_encoder()
+            if self.ngpu > 1:
+                self.model.module.predictor.freeze_encoder()
+            else:
+                self.model.predictor.freeze_encoder()
+
             loss = loss_adv
         elif adv_mode == 'asr':
-            self.model.module.predictor.unfreeze_encoder()
+            if self.ngpu > 1:
+                self.model.module.predictor.unfreeze_encoder()
+            else:
+                self.model.predictor.unfreeze_encoder()
             loss = loss_asr
         else:
-            self.model.module.predictor.unfreeze_encoder()
+            if self.ngpu > 1:
+                self.model.module.predictor.unfreeze_encoder()
+            else:
+                self.model.predictor.unfreeze_encoder()
             loss = loss_asr + loss_adv
 
         # Compute the loss at this time step and accumulate it
@@ -540,11 +550,11 @@ def encode(args):
     torch.manual_seed(args.seed)
 
     # read training config
-    idim, odim, train_args = get_model_conf(args.model, args.model_conf)
+    idim, odim, odim_adv, train_args = get_model_conf(args.model, args.model_conf)
 
     # load trained model parameters
     logging.info('reading model parameters from ' + args.model)
-    e2e = E2E(idim, odim, train_args)
+    e2e = E2E(idim, odim, train_args, odim_adv=odim_adv)
     model = Loss(e2e, train_args.mtlalpha)
     if train_args.rnnlm is not None:
         # set rnnlm. external rnnlm is used for recognition.
