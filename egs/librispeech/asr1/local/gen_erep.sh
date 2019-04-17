@@ -12,7 +12,7 @@ modeldir=
 erep_dir=
 
 recog_model=model.acc.best # set a model to be used for decoding: 'model.acc.best' or 'model.loss.best'
-nj=3
+nj=6
 train_set=data/train_960
 fbankdir=`pwd`/fbank
 # feature configuration
@@ -108,7 +108,15 @@ if [ ${stage} -le 1 ]; then
 
 	# set batchsize 0 to disable batch decoding
 	#${decode_cmd} ${erep_dir}/log/erep.3.log \
-	${decode_cmd} JOB=1:${nj} ${erep_dir}/log/erep.JOB.log \
+	CUDA_VISIBLE_DEVICES=0 ${decode_cmd} JOB=1:3 ${erep_dir}/log/erep.JOB.log \
+	    asr_encode.py \
+	    --ngpu ${ngpu} \
+	    --batchsize 0 \
+	    --feats-in ${split_dir}/feats.JOB.scp \
+	    --feats-out ${erep_dir}/erep_${feats_name}.JOB \
+	    --model ${modeldir}/${recog_model}  \
+	    &
+	CUDA_VISIBLE_DEVICES=1 ${decode_cmd} JOB=4:6 ${erep_dir}/log/erep.JOB.log \
 	    asr_encode.py \
 	    --ngpu ${ngpu} \
 	    --batchsize 0 \

@@ -22,6 +22,7 @@ egs/*/*/stft
 egs/*/*/enhan
 egs/*/*/wav*
 egs/librispeech/asr1/RIRS_NOISES
+egs/librispeech/asr1/rirs_noises.zip
 
 # tools related
 tools/kaldi
