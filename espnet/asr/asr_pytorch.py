@@ -358,7 +358,8 @@ def train(args):
     # Resume from a snapshot
     if args.resume:
         logging.info('resumed from %s' % args.resume)
-        torch_resume(args.resume, trainer, weight_sharing=args.weight_sharing)
+        torch_resume(args.resume, trainer, weight_sharing=args.weight_sharing,
+                    reinit_adv=True)
 
     # Evaluate the model with the test dataset for each epoch
     trainer.extend(CustomEvaluator(model, valid_iter, reporter, converter, device))

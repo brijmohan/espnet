@@ -393,7 +393,7 @@ def torch_load(path, model):
     del model_state_dict
 
 
-def torch_resume(snapshot_path, trainer, weight_sharing=False):
+def torch_resume(snapshot_path, trainer, weight_sharing=False, reinit_adv=False):
     """Function to resume from snapshot for pytorch
 
     :param str snapshot_path: snapshot file path
@@ -416,20 +416,22 @@ def torch_resume(snapshot_path, trainer, weight_sharing=False):
             trainer.updater.model.model.load_state_dict(snapshot_dict['model'])
     else:
         # (for ASR model)
-        if hasattr(trainer.updater.model, "module"):
-            # HACK: remove this later
-            #del snapshot_dict['model']['predictor.adv.output.bias']
-            #del snapshot_dict['model']['predictor.adv.output.weight']
-            # HACK: remove this later
+        # HACK: remove this later
+        #del snapshot_dict['model']['predictor.adv.output.bias']
+        #del snapshot_dict['model']['predictor.adv.output.weight']
+        # HACK: remove this later
 
+        # reinitialize only the adversarial branch to move it away from a
+        # possible local optima
+        if reinit_adv:
+            for k in snapshot_dict['model'].keys():
+                if k.startswith('predictor.adv'):
+                    del snapshot_dict['model'][k]
+
+        if hasattr(trainer.updater.model, "module"):
             trainer.updater.model.module.load_state_dict(snapshot_dict['model'],
                                                          strict=not weight_sharing)
         else:
-            # HACK: remove this later
-            #del snapshot_dict['model']['predictor.adv.output.bias']
-            #del snapshot_dict['model']['predictor.adv.output.weight']
-            # HACK: remove this later
-            
             trainer.updater.model.load_state_dict(snapshot_dict['model'],
                                                   strict=not weight_sharing)
 
