@@ -339,7 +339,10 @@ class E2E(torch.nn.Module):
         self.grlalpha = args.grlalpha
         if args.adv:
             self.train_adv = True
-            self.adv = SpeakerAdv(odim_adv, args.eprojs, args.adv_units,
+            #self.adv = SpeakerAdv(odim_adv, args.eprojs, args.adv_units,
+            #                      args.adv_layers,
+            #                      dropout_rate=args.dropout_rate)
+            self.adv = SpeakerAdvXvector(odim_adv, args.eprojs, args.adv_units,
                                   args.adv_layers,
                                   dropout_rate=args.dropout_rate)
         else:
@@ -758,12 +761,13 @@ class SpeakerAdvXvector(torch.nn.Module):
     """
 
     def __init__(self, odim, eprojs, advunits, advlayers, dropout_rate=0.2):
-        super(SpeakerAdv, self).__init__()
+        super(SpeakerAdvXvector, self).__init__()
         self.advunits = advunits
         self.advlayers = advlayers
+        self.dropout_rate = dropout_rate
         self.advnet = torch.nn.LSTM(eprojs, advunits, self.advlayers,
                                     batch_first=True, dropout=dropout_rate,
-                                    bidirectional=True)
+                                    bidirectional=False)
         '''
         linears = [torch.nn.Linear(eprojs, advunits), torch.nn.ReLU(),
                    torch.nn.Dropout(p=dropout_rate)]
@@ -779,11 +783,21 @@ class SpeakerAdvXvector(torch.nn.Module):
         #    layer_arr.extend([torch.nn.Linear(advunits, advunits),
         #                    torch.nn.ReLU(), torch.nn.Dropout(p=dropout_rate)])
         #self.advnet = torch.nn.Sequential(*layer_arr)
-        self.segment6 = torch.nn.Linear(2*advunits, advunits)
-        self.output = torch.nn.Linear(advunits, odim)
+        # 4x because; 2:bidirectional + 2:mean+stddev
+        # Right now just taking the last layer of advnet output
+        # Pass LSTM output through FC
+        self.segment6 = torch.nn.Linear(advunits, advunits)
+        self.bn1 = torch.nn.BatchNorm1d(advunits)
+
+        self.segment7 = torch.nn.Linear(advunits, advunits)
+
+        self.segment8 = torch.nn.Linear(2*advunits, 2*advunits)
+        self.bn2 = torch.nn.BatchNorm1d(2*advunits)
+
+        self.output = torch.nn.Linear(2*advunits, odim)
 
     def zero_state(self, hs_pad):
-        return hs_pad.new_zeros(2*self.advlayers, hs_pad.size(0), self.advunits)
+        return hs_pad.new_zeros(self.advlayers, hs_pad.size(0), self.advunits)
 
     def forward(self, hs_pad, hlens, y_adv):
         '''Adversarial branch forward
@@ -814,13 +828,24 @@ class SpeakerAdvXvector(torch.nn.Module):
         logging.info("advnet output size = %s", str(out_x.shape))
         logging.info("adversarial target size = %s", str(y_adv.shape))
 
+        out_x = F.dropout(F.relu(self.segment6(out_x)), p=self.dropout_rate)
+        out_x = F.relu(self.segment7(out_x))
+
         # STATS POOLING
+        # out shape: B x T x D
         xv_mean = torch.mean(out_x, 1)
         xv_std = torch.std(out_x, 1)
         xv = torch.cat((xv_mean, xv_std), 1)
+        # Take only the last output
+        #xv = out_x[:, -1, :]
 
-        y_hat = F.relu(self.segment6(xv))
-        y_hat = F.relu(self.output(y_hat))
+        logging.info("xvector shape: %s ", str(xv.shape))
+
+        #y_hat = F.dropout(self.bn1(F.relu(self.segment6(xv))), p=self.dropout_rate)
+        y_hat = self.bn2(self.segment8(xv))
+        #y_hat = self.bn2(F.relu(self.segment7(y_hat)))
+        #y_hat = F.dropout(self.bn2(F.relu(self.segment7(y_hat))), p=self.dropout_rate)
+        y_hat = self.output(y_hat)
 
         # Create labels tensor by replicating speaker label
         #batch_size, avg_seq_len, out_dim = y_hat.size()
@@ -842,7 +867,7 @@ class SpeakerAdvXvector(torch.nn.Module):
         #logging.info("artificial label size = %s", str(labels.shape))
 
         #loss = F.cross_entropy(y_hat, labels, size_average=True)
-        loss = F.cross_entropy(y_hat, y_adv, size_average=True)
+        loss = F.cross_entropy(y_hat, y_adv.squeeze(), size_average=True)
         logging.info("Adversarial loss = %f", loss.item())
         #acc = th_accuracy(y_hat, labels.unsqueeze(0), -1)
         acc = th_accuracy(y_hat, y_adv, -1)
