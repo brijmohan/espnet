@@ -198,7 +198,7 @@ class Loss(torch.nn.Module):
         self.predictor = predictor
         self.reporter = Reporter()
 
-    def forward(self, xs_pad, ilens, ys_pad, y_adv=None):
+    def forward(self, xs_pad, ilens, ys_pad, y_adv=None, grlalpha=None):
         '''Multi-task learning loss forward
 
         :param torch.Tensor xs_pad: batch of padded input sequences (B, Tmax, idim)
@@ -209,8 +209,8 @@ class Loss(torch.nn.Module):
         '''
         self.loss = None
         loss_ctc, loss_att, acc, cer, wer, loss_adv, acc_adv = self.predictor(xs_pad, ilens,
-                                                                 ys_pad,
-                                                                 y_adv=y_adv)
+                                                                 ys_pad, y_adv=y_adv,
+                                                                 grlalpha=grlalpha)
         alpha = self.mtlalpha
         if alpha == 0:
             self.loss = loss_att
@@ -410,6 +410,12 @@ class E2E(torch.nn.Module):
         # https://discuss.pytorch.org/t/set-forget-gate-bias-of-lstm/1745
         for l in six.moves.range(len(self.dec.decoder)):
             set_forget_bias_to_one(self.dec.decoder[l].bias_ih)
+        # For adversarial layer
+        if hasattr(self, 'adv'):
+            for names in self.adv.advnet._all_weights:
+                for name in filter(lambda n: "bias" in n,  names):
+                    bias = getattr(self.adv.advnet, name)
+                    set_forget_bias_to_one(bias)
 
     def freeze_encoder(self):
         if not self.enc_frozen:
@@ -423,7 +429,7 @@ class E2E(torch.nn.Module):
                 param.requires_grad = True
             self.enc_frozen = False
 
-    def forward(self, xs_pad, ilens, ys_pad, y_adv=None):
+    def forward(self, xs_pad, ilens, ys_pad, y_adv=None, grlalpha=None):
         '''E2E forward
 
         :param torch.Tensor xs_pad: batch of padded input sequences (B, Tmax, idim)
@@ -459,8 +465,10 @@ class E2E(torch.nn.Module):
 
         # 4. Adversarial loss
         if self.train_adv:
-            logging.info("Computing adversarial loss")
-            rev_hs_pad = ReverseLayerF.apply(hs_pad, self.grlalpha)
+            if not grlalpha:
+                grlalpha = self.grlalpha
+            logging.info("Computing adversarial loss...GRLALPHA = %f", grlalpha)
+            rev_hs_pad = ReverseLayerF.apply(hs_pad, grlalpha)
             loss_adv, acc_adv = self.adv(rev_hs_pad, hlens, y_adv)
 
         # 5. compute cer/wer
@@ -667,6 +675,7 @@ class SpeakerAdv(torch.nn.Module):
         super(SpeakerAdv, self).__init__()
         self.advunits = advunits
         self.advlayers = advlayers
+        self.odim_adv = odim
         self.advnet = torch.nn.LSTM(eprojs, advunits, self.advlayers,
                                     batch_first=True, dropout=dropout_rate,
                                     bidirectional=True)
@@ -685,10 +694,57 @@ class SpeakerAdv(torch.nn.Module):
         #    layer_arr.extend([torch.nn.Linear(advunits, advunits),
         #                    torch.nn.ReLU(), torch.nn.Dropout(p=dropout_rate)])
         #self.advnet = torch.nn.Sequential(*layer_arr)
+
         self.output = torch.nn.Linear(2*advunits, odim)
 
     def zero_state(self, hs_pad):
         return hs_pad.new_zeros(2*self.advlayers, hs_pad.size(0), self.advunits)
+
+    def init_like_chainer(self):
+        '''
+        Copied from E2E class so that adv branch can be separately
+        re-initialized
+        '''
+        """Initialize weight like chainer
+
+        chainer basically uses LeCun way: W ~ Normal(0, fan_in ** -0.5), b = 0
+        pytorch basically uses W, b ~ Uniform(-fan_in**-0.5, fan_in**-0.5)
+
+        however, there are two exceptions as far as I know.
+        - EmbedID.W ~ Normal(0, 1)
+        - LSTM.upward.b[forget_gate_range] = 1 (but not used in NStepLSTM)
+        """
+        def lecun_normal_init_parameters(module):
+            for p in module.parameters():
+                data = p.data
+                if data.dim() == 1:
+                    # bias
+                    data.zero_()
+                elif data.dim() == 2:
+                    # linear weight
+                    n = data.size(1)
+                    stdv = 1. / math.sqrt(n)
+                    data.normal_(0, stdv)
+                elif data.dim() == 4:
+                    # conv weight
+                    n = data.size(1)
+                    for k in data.size()[2:]:
+                        n *= k
+                    stdv = 1. / math.sqrt(n)
+                    data.normal_(0, stdv)
+                else:
+                    raise NotImplementedError
+
+        def set_forget_bias_to_one(bias):
+            n = bias.size(0)
+            start, end = n // 4, n // 2
+            bias.data[start:end].fill_(1.)
+
+        lecun_normal_init_parameters(self)
+        for names in self.advnet._all_weights:
+            for name in filter(lambda n: "bias" in n,  names):
+                bias = getattr(self.advnet, name)
+                set_forget_bias_to_one(bias)
 
     def forward(self, hs_pad, hlens, y_adv):
         '''Adversarial branch forward
@@ -724,9 +780,13 @@ class SpeakerAdv(torch.nn.Module):
         # Create labels tensor by replicating speaker label
         batch_size, avg_seq_len, out_dim = y_hat.size()
 
-        labels = torch.zeros([batch_size, avg_seq_len], dtype=torch.int64)
+        labels = torch.zeros([batch_size, avg_seq_len], dtype=torch.float64)
         for ix in range(batch_size):
+            # make 1-hot vector
+            #tx = torch.zeros((self.odim_adv))
+            #tx[y_adv[ix]] = 1.0
             labels[ix, :] = y_adv[ix]
+            #labels[ix, :, :] = tx
 
         # Mean over sequence length
         #y_hat = torch.mean(y_hat, 1)
@@ -737,10 +797,12 @@ class SpeakerAdv(torch.nn.Module):
         y_hat = y_hat.view((-1, out_dim))
         labels = labels.contiguous().view(-1)
         labels = to_cuda(self, labels.long())
+        #labels = to_cuda(self, labels.float())
         logging.info("adversarial output size = %s", str(y_hat.shape))
         logging.info("artificial label size = %s", str(labels.shape))
 
         loss = F.cross_entropy(y_hat, labels, size_average=True)
+        #loss = F.kl_div(y_hat, labels, size_average=True)
         logging.info("Adversarial loss = %f", loss.item())
         acc = th_accuracy(y_hat, labels.unsqueeze(0), -1)
         logging.info("Adversarial accuracy = %f", acc)

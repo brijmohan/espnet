@@ -75,6 +75,11 @@ def get_advsched(advstr, nepochs):
     advsched[ecnt] = sp[-1][0]
     return advsched
 
+def get_grlalpha(max_grlalpha, ep_num, total_epochs):
+    p_i = ep_num / float(total_epochs)
+    cga = float(max_grlalpha * (2.0 / (1.0 + np.exp(-10 * p_i)) - 1.0))
+    logging.info(" ------------- CGA = %f ---------", cga)
+    return cga
 
 class CustomEvaluator(extensions.Evaluator):
     '''Custom evaluater for pytorch'''
@@ -120,7 +125,8 @@ class CustomUpdater(training.StandardUpdater):
     '''Custom updater for pytorch'''
 
     def __init__(self, model, grad_clip_threshold, train_iter,
-                 optimizer, converter, device, ngpu, adv_schedule=None):
+                 optimizer, converter, device, ngpu, adv_schedule=None,
+                 max_grlalpha=None):
         super(CustomUpdater, self).__init__(train_iter, optimizer)
         self.model = model
         self.grad_clip_threshold = grad_clip_threshold
@@ -128,6 +134,8 @@ class CustomUpdater(training.StandardUpdater):
         self.device = device
         self.ngpu = ngpu
         self.adv_schedule = adv_schedule
+        self.last_adv_mode = None
+        self.max_grlalpha = max_grlalpha
 
     # The core part of the update routine can be customized by overriding.
     def update_core(self):
@@ -140,11 +148,42 @@ class CustomUpdater(training.StandardUpdater):
         batch = train_iter.next()
         x = self.converter(batch, self.device)
 
-        adv_mode = self.adv_schedule[int(self.epoch_detail)]
+        curr_epoch = int(self.epoch_detail)
+        adv_mode = self.adv_schedule[curr_epoch]
         logging.info("Epoch detail = %f, Adv mode = %s", self.epoch_detail,
                      adv_mode)
+        # If transitioning to speaker branch training - RESET!
+        if curr_epoch > 0:
+            if self.last_adv_mode != 'spk' and adv_mode == 'spk':
+                logging.info(" ----- Resetting the adversarial branch weights... -----")
+                if self.ngpu > 1:
+                    logging.info("Some weights before resetting ---")
+                    for p in self.model.module.predictor.adv.advnet.parameters():
+                        logging.info(p)
+                        break
 
-        loss_asr, loss_adv = self.model(*x)
+                    self.model.module.predictor.adv.init_like_chainer()
+
+                    logging.info("Some weights after resetting ---")
+                    for p in self.model.module.predictor.adv.advnet.parameters():
+                        logging.info(p)
+                        break
+                else:
+                    logging.info("Some weights before resetting ---")
+                    for p in self.model.predictor.adv.advnet.parameters():
+                        logging.info(p)
+                        break
+
+                    self.model.predictor.adv.init_like_chainer()
+
+                    logging.info("Some weights after resetting ---")
+                    for p in self.model.predictor.adv.advnet.parameters():
+                        logging.info(p)
+                        break
+
+        curr_grlalpha = get_grlalpha(self.max_grlalpha, self.epoch_detail,
+                                     len(self.adv_schedule))
+        loss_asr, loss_adv = self.model(*x, grlalpha=curr_grlalpha)
 
         if adv_mode == 'spk':
             if self.ngpu > 1:
@@ -155,9 +194,9 @@ class CustomUpdater(training.StandardUpdater):
             loss = loss_adv
         elif adv_mode == 'asr':
             if self.ngpu > 1:
-                self.model.module.predictor.unfreeze_encoder()
+                self.model.module.predictor.freeze_encoder()
             else:
-                self.model.predictor.unfreeze_encoder()
+                self.model.predictor.freeze_encoder()
             loss = loss_asr
         else:
             if self.ngpu > 1:
@@ -184,6 +223,9 @@ class CustomUpdater(training.StandardUpdater):
             logging.warning('grad norm is nan. Do not update model.')
         else:
             optimizer.step()
+
+        # Update last adv mode
+        self.last_adv_mode = adv_mode
 
 
 class CustomConverter(object):
@@ -300,11 +342,23 @@ def train(args):
     model = model.to(device)
 
     # Setup an optimizer
+    # First distinguish between learning rates
+    if args.ngpu > 1:
+        param_grp = [
+            {'params': model.module.predictor.enc.parameters(), 'lr': 0.05},
+            {'params': model.module.predictor.dec.parameters(), 'lr': 0.05},
+            {'params': model.module.predictor.adv.parameters(), 'lr': 1.0}
+        ]
+    else:
+        param_grp = [
+            {'params': model.predictor.enc.parameters(), 'lr': 0.05},
+            {'params': model.predictor.dec.parameters(), 'lr': 0.05},
+            {'params': model.predictor.adv.parameters(), 'lr': 1.0}
+        ]
     if args.opt == 'adadelta':
-        optimizer = torch.optim.Adadelta(
-            model.parameters(), rho=0.95, eps=args.eps)
+        optimizer = torch.optim.Adadelta(param_grp, rho=0.95, eps=args.eps)
     elif args.opt == 'adam':
-        optimizer = torch.optim.Adam(model.parameters())
+        optimizer = torch.optim.Adam(param_grp)
 
     # FIXME: TOO DIRTY HACK
     setattr(optimizer, "target", reporter)
@@ -351,15 +405,16 @@ def train(args):
     # Set up a trainer
     updater = CustomUpdater(
         model, args.grad_clip, train_iter, optimizer, converter, device,
-        args.ngpu, adv_schedule=adv_schedule)
+        args.ngpu, adv_schedule=adv_schedule, max_grlalpha=args.grlalpha)
     trainer = training.Trainer(
         updater, (args.epochs, 'epoch'), out=args.outdir)
 
     # Resume from a snapshot
     if args.resume:
         logging.info('resumed from %s' % args.resume)
+        #torch_resume(args.resume, trainer, weight_sharing=args.weight_sharing)
         torch_resume(args.resume, trainer, weight_sharing=args.weight_sharing,
-                    reinit_adv=True)
+                    reinit_adv=args.reinit_adv)
 
     # Evaluate the model with the test dataset for each epoch
     trainer.extend(CustomEvaluator(model, valid_iter, reporter, converter, device))

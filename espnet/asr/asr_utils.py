@@ -424,6 +424,7 @@ def torch_resume(snapshot_path, trainer, weight_sharing=False, reinit_adv=False)
         # reinitialize only the adversarial branch to move it away from a
         # possible local optima
         if reinit_adv:
+            logging.info("Removing the learnt weights of adversarial branch ...")
             for k in snapshot_dict['model'].keys():
                 if k.startswith('predictor.adv'):
                     del snapshot_dict['model'][k]

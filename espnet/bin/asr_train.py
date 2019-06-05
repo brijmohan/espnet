@@ -168,6 +168,8 @@ def main():
                         help='Number of decoder hidden units')
     parser.add_argument('--grlalpha', default=0.5, type=float,
                         help='Gradient reversal layer scale param')
+    parser.add_argument('--reinit-adv', default=False, action='store_true',
+                        help='To reinitialize the speaker adversarial branch')
 
     args = parser.parse_args()
 
