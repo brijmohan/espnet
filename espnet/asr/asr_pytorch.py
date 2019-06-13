@@ -157,29 +157,14 @@ class CustomUpdater(training.StandardUpdater):
             if self.last_adv_mode != 'spk' and adv_mode == 'spk':
                 logging.info(" ----- Resetting the adversarial branch weights... -----")
                 if self.ngpu > 1:
-                    logging.info("Some weights before resetting ---")
-                    for p in self.model.module.predictor.adv.advnet.parameters():
-                        logging.info(p)
-                        break
-
                     self.model.module.predictor.adv.init_like_chainer()
-
-                    logging.info("Some weights after resetting ---")
-                    for p in self.model.module.predictor.adv.advnet.parameters():
-                        logging.info(p)
-                        break
                 else:
-                    logging.info("Some weights before resetting ---")
-                    for p in self.model.predictor.adv.advnet.parameters():
-                        logging.info(p)
-                        break
-
                     self.model.predictor.adv.init_like_chainer()
 
-                    logging.info("Some weights after resetting ---")
-                    for p in self.model.predictor.adv.advnet.parameters():
-                        logging.info(p)
-                        break
+                    #logging.info("Some weights after resetting ---")
+                    #for p in self.model.predictor.adv.advnet.parameters():
+                    #    logging.info(p)
+                    #    break
 
         curr_grlalpha = get_grlalpha(self.max_grlalpha, self.epoch_detail,
                                      len(self.adv_schedule))
@@ -345,15 +330,15 @@ def train(args):
     # First distinguish between learning rates
     if args.ngpu > 1:
         param_grp = [
-            {'params': model.module.predictor.enc.parameters(), 'lr': 0.05},
-            {'params': model.module.predictor.dec.parameters(), 'lr': 0.05},
-            {'params': model.module.predictor.adv.parameters(), 'lr': 1.0}
+            {'params': model.module.predictor.enc.parameters(), 'lr': args.asr_lr},
+            {'params': model.module.predictor.dec.parameters(), 'lr': args.asr_lr},
+            {'params': model.module.predictor.adv.parameters(), 'lr': args.adv_lr}
         ]
     else:
         param_grp = [
-            {'params': model.predictor.enc.parameters(), 'lr': 0.05},
-            {'params': model.predictor.dec.parameters(), 'lr': 0.05},
-            {'params': model.predictor.adv.parameters(), 'lr': 1.0}
+            {'params': model.predictor.enc.parameters(), 'lr': args.asr_lr},
+            {'params': model.predictor.dec.parameters(), 'lr': args.asr_lr},
+            {'params': model.predictor.adv.parameters(), 'lr': args.adv_lr}
         ]
     if args.opt == 'adadelta':
         optimizer = torch.optim.Adadelta(param_grp, rho=0.95, eps=args.eps)

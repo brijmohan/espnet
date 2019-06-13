@@ -8,13 +8,15 @@
 
 # general configuration
 backend=pytorch
-stage=1       # start from -1 if you need to start from data download
+stage=4       # start from -1 if you need to start from data download
 ngpu=2         # number of gpus ("0" uses cpu, otherwise use gpu)
 debugmode=1
 dumpdir=dump   # directory to dump full features
 N=0            # number of minibatches to be used (mainly for debugging). "0" uses all minibatches.
 verbose=1      # verbose option
-resume="~/asr_tools/espnet/egs/librispeech/asr1/exp/train_960_pytorch_vggblstm_e5_subsample1_2_2_1_1_unit1024_proj1024_d2_unit1024_location_aconvc10_aconvf100_mtlalpha0.5_adadelta_sampprob0.0_bs20_mli800_mlo150/results/snapshot.ep.10"        # Resume the training from snapshot
+#resume="exp/train_960_pytorch_adv_units1024_layers3_grlalpha0.5/results/snapshot.ep.4_afteradvspk2"        # Resume the training from snapshot
+#resume="exp/train_460_pytorch_adv_units512_layers3_grlalpha0_pretrained2/results/snapshot.ep.10"        # Resume the training from snapshot
+resume="exp/train_460_pytorch_adv_units512_layers3_grlalpha0_sphspk/results/snapshot.ep.20"        # Resume the training from snapshot
 weight_sharing=true           # Resume with weight sharing means that only available weights will be applied to the given model otherwise if it is false then a snapshot is resumed normally.
 
 # feature configuration
@@ -40,13 +42,13 @@ aconv_filts=100
 mtlalpha=0.5
 
 # minibatch related
-batchsize=10
+batchsize=20
 maxlen_in=800  # if input length  > maxlen_in, batchsize is automatically reduced
 maxlen_out=150 # if output length > maxlen_out, batchsize is automatically reduced
 
 # optimization related
 opt=adadelta
-epochs=25
+epochs=30
 
 # rnnlm related
 lm_layers=1
@@ -89,13 +91,15 @@ bpemode=unigram
 # adv = train both the branches and backpropagate adversarial loss
 # It can be combined for scheduling the training in different modes
 # Eg: spk5,asr5,adv5,spk5
-adv_mode="spk10,adv10,spk5"
+adv_mode="adv20,spk10"
 adv_layers=3
 adv_units=512
-grlalpha=0.5
+grlalpha=10
+asr_lr=0.07
+adv_lr=1.0
 
 # exp tag
-tag="adv_units${adv_units}_layers${adv_layers}_grlalpha${grlalpha}" # tag for managing experiments.
+tag="adv_units${adv_units}_layers${adv_layers}_grlalpha${grlalpha}_sphspk_difflr_${asr_lr}_${adv_lr}" # tag for managing experiments.
 
 . utils/parse_options.sh || exit 1;
 
@@ -108,8 +112,8 @@ set -e
 set -u
 set -o pipefail
 
-#train_set=train_960
-train_set=train_100
+train_set=train_460
+#train_set=train_100
 train_dev=dev
 recog_set="test_clean test_other dev_clean dev_other"
 
@@ -134,35 +138,31 @@ fi
 
 feat_tr_dir=${dumpdir}/${train_set}/delta${do_delta}; mkdir -p ${feat_tr_dir}
 feat_dt_dir=${dumpdir}/${train_dev}/delta${do_delta}; mkdir -p ${feat_dt_dir}
-cmvn_file=../../librispeech/asr1/data/train_960/cmvn.ark
+#cmvn_file=data/train_960/cmvn.ark
+cmvn_file=data/${train_set}/cmvn.ark
 if [ ${stage} -le 1 ]; then
     ### Task dependent. You have to design training and dev sets by yourself.
     ### But you can utilize Kaldi recipes in most cases
     echo "stage 1: Feature Generation"
     fbankdir=fbank
     # Generate the fbank features; by default 80-dimensional fbanks with pitch on each frame
-    : '
-    for x in dev_clean test_clean dev_other test_other train_clean_100; do
-        steps/make_fbank_pitch.sh --cmd "$train_cmd" --nj 32 --write_utt2num_frames true \
-            data/${x} exp/make_fbank/${x} ${fbankdir}
-    done
-    '
-    for x in train_clean_100; do
+    for x in dev_clean test_clean dev_other test_other train_clean_100 train_clean_360; do
         steps/make_fbank_pitch.sh --cmd "$train_cmd" --nj 32 --write_utt2num_frames true \
             data/${x} exp/make_fbank/${x} ${fbankdir}
     done
 
     #utils/combine_data.sh --extra_files utt2num_frames data/${train_set}_org data/train_clean_100 data/train_clean_360 data/train_other_500
-    #utils/combine_data.sh --extra_files utt2num_frames data/${train_dev}_org data/dev_clean data/dev_other
+    utils/combine_data.sh --extra_files utt2num_frames data/${train_set}_org data/train_clean_100 data/train_clean_360
+    utils/combine_data.sh --extra_files utt2num_frames data/${train_dev}_org data/dev_clean data/dev_other
 
     # remove utt having more than 3000 frames
     # remove utt having more than 400 characters
-    #remove_longshortdata.sh --maxframes 3000 --maxchars 400 data/${train_set}_org data/${train_set}
-    remove_longshortdata.sh --maxframes 3000 --maxchars 400 data/train_clean_100 data/${train_set}
-    #remove_longshortdata.sh --maxframes 3000 --maxchars 400 data/${train_dev}_org data/${train_dev}
+    remove_longshortdata.sh --maxframes 3000 --maxchars 400 data/${train_set}_org data/${train_set}
+    #remove_longshortdata.sh --maxframes 3000 --maxchars 400 data/train_clean_100 data/${train_set}
+    remove_longshortdata.sh --maxframes 3000 --maxchars 400 data/${train_dev}_org data/${train_dev}
 
     # compute global CMVN
-    #compute-cmvn-stats scp:data/${train_set}/feats.scp data/${train_set}/cmvn.ark
+    compute-cmvn-stats scp:data/${train_set}/feats.scp $cmvn_file
 
     # dump features for training
     if [[ $(hostname -f) == *.clsp.jhu.edu ]] && [ ! -d ${feat_tr_dir}/storage ]; then
@@ -175,6 +175,7 @@ if [ ${stage} -le 1 ]; then
         /export/b{14,15,16,17}/${USER}/espnet-data/egs/librispeech/asr1/dump/${train_dev}/delta${do_delta}/storage \
         ${feat_dt_dir}/storage
     fi
+    
     dump.sh --cmd "$train_cmd" --nj 40 --do_delta $do_delta \
         data/${train_set}/feats.scp ${cmvn_file} exp/dump_feats/train ${feat_tr_dir}
     dump.sh --cmd "$train_cmd" --nj 32 --do_delta $do_delta \
@@ -312,10 +313,11 @@ if [ ${stage} -le 4 ]; then
 	--adv ${adv_mode} \
 	--adv-layers ${adv_layers} \
 	--adv-units ${adv_units} \
-	--grlalpha ${grlalpha}
+	--grlalpha ${grlalpha} \
+	--asr-lr ${asr_lr} \
+	--adv-lr ${adv_lr}
 
 fi
-
 
 if [ ${stage} -le 5 ]; then
     echo "stage 5: Decoding"
@@ -356,11 +358,9 @@ if [ ${stage} -le 5 ]; then
     ) &
     done
     wait
-    echo "Finished"
+    echo "Finished testing eval sets"
 fi
 
-
-: '
 if [ ${stage} -le 6 ]; then
     echo "stage 6: Adversarial decoding"
     nj=10
@@ -389,11 +389,12 @@ if [ ${stage} -le 6 ]; then
             --minlenratio ${minlenratio} \
             --ctc-weight ${ctc_weight} \
             --rnnlm ${lmexpdir}/rnnlm.model.best \
-            --lm-weight ${lm_weight} \
+            --lm-weight ${lm_weight}
+
+	wait
 
         score_sclite.sh --bpe ${nbpe} --bpemodel ${bpemodel}.model --wer true ${expdir}/${decode_dir} ${dict}
 
-    echo "Finished"
+    echo "Finished testing train split test"
 fi
-'
 

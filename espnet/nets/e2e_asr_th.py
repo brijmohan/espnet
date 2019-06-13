@@ -196,6 +196,9 @@ class Loss(torch.nn.Module):
         self.loss = None
         self.accuracy = None
         self.predictor = predictor
+        self.last_loss_ctc = None
+        self.last_loss_att = None
+        self.last_acc = None
         self.reporter = Reporter()
 
     def forward(self, xs_pad, ilens, ys_pad, y_adv=None, grlalpha=None):
@@ -225,6 +228,12 @@ class Loss(torch.nn.Module):
             loss_att_data = float(loss_att.item())
             loss_ctc_data = float(loss_ctc.item())
 
+        # For continuation in the plot
+        if acc:
+            self.last_acc = acc
+            self.last_loss_ctc = loss_ctc_data
+            self.last_loss_att = loss_att_data
+
         # Add adversarial loss
         if self.predictor.train_adv:
             #self.loss = self.loss + loss_adv
@@ -232,6 +241,13 @@ class Loss(torch.nn.Module):
 
         loss_data = float(self.loss)
         if loss_data < CTC_LOSS_THRESHOLD and not math.isnan(loss_data):
+            # For continuation in the plot
+            if not acc:
+                acc = self.last_acc
+                loss_ctc_data = self.last_loss_ctc
+                loss_att_data = self.last_loss_att
+                loss_data = loss_ctc_data + loss_att_data
+
             self.reporter.report(loss_ctc_data, loss_att_data, acc, cer, wer,
                                  loss_adv_data, acc_adv, loss_data)
         else:
@@ -857,6 +873,52 @@ class SpeakerAdvXvector(torch.nn.Module):
         self.bn2 = torch.nn.BatchNorm1d(2*advunits)
 
         self.output = torch.nn.Linear(2*advunits, odim)
+
+    def init_like_chainer(self):
+        '''
+        Copied from E2E class so that adv branch can be separately
+        re-initialized
+        '''
+        """Initialize weight like chainer
+
+        chainer basically uses LeCun way: W ~ Normal(0, fan_in ** -0.5), b = 0
+        pytorch basically uses W, b ~ Uniform(-fan_in**-0.5, fan_in**-0.5)
+
+        however, there are two exceptions as far as I know.
+        - EmbedID.W ~ Normal(0, 1)
+        - LSTM.upward.b[forget_gate_range] = 1 (but not used in NStepLSTM)
+        """
+        def lecun_normal_init_parameters(module):
+            for p in module.parameters():
+                data = p.data
+                if data.dim() == 1:
+                    # bias
+                    data.zero_()
+                elif data.dim() == 2:
+                    # linear weight
+                    n = data.size(1)
+                    stdv = 1. / math.sqrt(n)
+                    data.normal_(0, stdv)
+                elif data.dim() == 4:
+                    # conv weight
+                    n = data.size(1)
+                    for k in data.size()[2:]:
+                        n *= k
+                    stdv = 1. / math.sqrt(n)
+                    data.normal_(0, stdv)
+                else:
+                    raise NotImplementedError
+
+        def set_forget_bias_to_one(bias):
+            n = bias.size(0)
+            start, end = n // 4, n // 2
+            bias.data[start:end].fill_(1.)
+
+        lecun_normal_init_parameters(self)
+        for names in self.advnet._all_weights:
+            for name in filter(lambda n: "bias" in n,  names):
+                bias = getattr(self.advnet, name)
+                set_forget_bias_to_one(bias)
 
     def zero_state(self, hs_pad):
         return hs_pad.new_zeros(self.advlayers, hs_pad.size(0), self.advunits)

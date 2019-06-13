@@ -8,8 +8,8 @@
 
 # general configuration
 backend=pytorch
-stage=5       # start from -1 if you need to start from data download
-ngpu=0         # number of gpus ("0" uses cpu, otherwise use gpu)
+stage=1       # start from -1 if you need to start from data download
+ngpu=2         # number of gpus ("0" uses cpu, otherwise use gpu)
 debugmode=1
 dumpdir=dump   # directory to dump full features
 N=0            # number of minibatches to be used (mainly for debugging). "0" uses all minibatches.
@@ -82,7 +82,7 @@ nbpe=5000
 bpemode=unigram
 
 # exp tag
-tag="" # tag for managing experiments.
+tag="pretrained" # tag for managing experiments.
 
 . utils/parse_options.sh || exit 1;
 
@@ -95,7 +95,7 @@ set -e
 set -u
 set -o pipefail
 
-train_set=train_960
+train_set=train_460
 train_dev=dev
 recog_set="test_clean test_other dev_clean dev_other"
 
@@ -123,13 +123,16 @@ if [ ${stage} -le 1 ]; then
     ### But you can utilize Kaldi recipes in most cases
     echo "stage 1: Feature Generation"
     fbankdir=fbank
+    : '
     # Generate the fbank features; by default 80-dimensional fbanks with pitch on each frame
     for x in dev_clean test_clean dev_other test_other train_clean_100 train_clean_360 train_other_500; do
         steps/make_fbank_pitch.sh --cmd "$train_cmd" --nj 32 --write_utt2num_frames true \
             data/${x} exp/make_fbank/${x} ${fbankdir}
     done
+    '
 
-    utils/combine_data.sh --extra_files utt2num_frames data/${train_set}_org data/train_clean_100 data/train_clean_360 data/train_other_500
+    #utils/combine_data.sh --extra_files utt2num_frames data/${train_set}_org data/train_clean_100 data/train_clean_360 data/train_other_500
+    utils/combine_data.sh --extra_files utt2num_frames data/${train_set}_org data/train_clean_100 data/train_clean_360
     utils/combine_data.sh --extra_files utt2num_frames data/${train_dev}_org data/dev_clean data/dev_other
 
     # remove utt having more than 3000 frames
@@ -196,6 +199,7 @@ fi
 lmexpdir=exp/train_rnnlm_${backend}_${lmtag}_${bpemode}${nbpe}
 mkdir -p ${lmexpdir}
 
+: '
 if [ ${stage} -le 3 ]; then
     echo "stage 3: LM Preparation"
     lmdatadir=data/local/lm_train_${bpemode}${nbpe}
@@ -231,6 +235,7 @@ if [ ${stage} -le 3 ]; then
         --maxlen ${lm_maxlen} \
         --dict ${dict}
 fi
+'
 
 if [ -z ${tag} ]; then
     expdir=exp/${train_set}_${backend}_${etype}_e${elayers}_subsample${subsample}_unit${eunits}_proj${eprojs}_d${dlayers}_unit${dunits}_${atype}_aconvc${aconv_chans}_aconvf${aconv_filts}_mtlalpha${mtlalpha}_${opt}_sampprob${samp_prob}_bs${batchsize}_mli${maxlen_in}_mlo${maxlen_out}
