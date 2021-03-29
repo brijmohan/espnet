@@ -50,7 +50,7 @@ maxlen_out=150 # if output length > maxlen_out, batchsize is automatically reduc
 
 # optimization related
 opt=adadelta
-epochs=21
+epochs=20
 
 # rnnlm related
 lm_layers=1
@@ -93,10 +93,10 @@ bpemode=unigram
 # adv = train both the branches and backpropagate adversarial loss
 # It can be combined for scheduling the training in different modes
 # Eg: spk5,asr5,adv5,spk5
-adv_mode="spk1,adv15,spk5"
+adv_mode="spk5,adv10,spk5"
 adv_layers=3
 adv_units=512
-grlalpha=20.0
+grlalpha=20000
 asr_lr=1.0
 adv_lr=1.0
 
@@ -319,9 +319,11 @@ if [ ${stage} -le 4 ]; then
 	--grlalpha ${grlalpha} \
 	--asr-lr ${asr_lr} \
 	--adv-lr ${adv_lr}
+	#--reinit-adv
 
 fi
 
+: '
 if [ ${stage} -le 5 ]; then
     echo "stage 5: Decoding"
     nj=10
@@ -400,3 +402,4 @@ if [ ${stage} -le 6 ]; then
 
     echo "Finished testing train split test"
 fi
+'

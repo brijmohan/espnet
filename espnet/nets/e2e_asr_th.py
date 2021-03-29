@@ -228,11 +228,14 @@ class Loss(torch.nn.Module):
             loss_att_data = float(loss_att.item())
             loss_ctc_data = float(loss_ctc.item())
 
+        '''
         # For continuation in the plot
         if acc:
+            logging.info("Saving these values in self...")
             self.last_acc = acc
             self.last_loss_ctc = loss_ctc_data
             self.last_loss_att = loss_att_data
+        '''
 
         # Add adversarial loss
         if self.predictor.train_adv:
@@ -242,11 +245,14 @@ class Loss(torch.nn.Module):
         loss_data = float(self.loss)
         if loss_data < CTC_LOSS_THRESHOLD and not math.isnan(loss_data):
             # For continuation in the plot
+            '''
             if not acc:
+                logging.info("Continuation of the plot.... acc update = %f", self.last_acc)
                 acc = self.last_acc
                 loss_ctc_data = self.last_loss_ctc
                 loss_att_data = self.last_loss_att
                 loss_data = loss_ctc_data + loss_att_data
+            '''
 
             self.reporter.report(loss_ctc_data, loss_att_data, acc, cer, wer,
                                  loss_adv_data, acc_adv, loss_data)
@@ -355,12 +361,12 @@ class E2E(torch.nn.Module):
         self.grlalpha = args.grlalpha
         if args.adv:
             self.train_adv = True
-            #self.adv = SpeakerAdv(odim_adv, args.eprojs, args.adv_units,
-            #                      args.adv_layers,
-            #                      dropout_rate=args.dropout_rate)
-            self.adv = SpeakerAdvXvector(odim_adv, args.eprojs, args.adv_units,
+            self.adv = SpeakerAdv(odim_adv, args.eprojs, args.adv_units,
                                   args.adv_layers,
                                   dropout_rate=args.dropout_rate)
+            #self.adv = SpeakerAdvXvector(odim_adv, args.eprojs, args.adv_units,
+            #                      args.adv_layers,
+            #                      dropout_rate=args.dropout_rate)
         else:
             self.train_adv = False
 
@@ -690,7 +696,7 @@ class SpeakerAdv(torch.nn.Module):
     :param float dropout_rate: dropout rate (0.0 ~ 1.0)
     """
 
-    def __init__(self, odim, eprojs, advunits, advlayers, dropout_rate=0.2):
+    def __init__(self, odim, eprojs, advunits, advlayers, dropout_rate=0.3):
         super(SpeakerAdv, self).__init__()
         self.advunits = advunits
         self.advlayers = advlayers
@@ -787,10 +793,7 @@ class SpeakerAdv(torch.nn.Module):
 
         self.advnet.flatten_parameters()
         out_x, (h_0, c_0) = self.advnet(hs_pad, (h_0, c_0))
-        #vgg_x, _ = self.vgg(hs_pad, hlens)
-        #out_x = self.advnet(vgg_x)
 
-        #logging.info("vgg output size = %s", str(vgg_x.shape))
         logging.info("advnet output size = %s", str(out_x.shape))
         logging.info("adversarial target size = %s", str(y_adv.shape))
 
@@ -801,11 +804,7 @@ class SpeakerAdv(torch.nn.Module):
 
         labels = torch.zeros([batch_size, avg_seq_len], dtype=torch.float64)
         for ix in range(batch_size):
-            # make 1-hot vector
-            #tx = torch.zeros((self.odim_adv))
-            #tx[y_adv[ix]] = 1.0
             labels[ix, :] = y_adv[ix]
-            #labels[ix, :, :] = tx
 
         # Mean over sequence length
         #y_hat = torch.mean(y_hat, 1)
@@ -820,7 +819,7 @@ class SpeakerAdv(torch.nn.Module):
         logging.info("adversarial output size = %s", str(y_hat.shape))
         logging.info("artificial label size = %s", str(labels.shape))
 
-        loss = F.cross_entropy(y_hat, labels, size_average=True)
+        loss = F.cross_entropy(y_hat, labels, size_average=False)
         #loss = F.kl_div(y_hat, labels, size_average=True)
         logging.info("Adversarial loss = %f", loss.item())
         acc = th_accuracy(y_hat, labels.unsqueeze(0), -1)

@@ -166,8 +166,11 @@ class CustomUpdater(training.StandardUpdater):
                     #    logging.info(p)
                     #    break
 
-        curr_grlalpha = get_grlalpha(self.max_grlalpha, self.epoch_detail,
-                                     len(self.adv_schedule))
+        # UNCOMMENT NEXT LINE TO ALLOW exponentially growing alpha
+        #curr_grlalpha = get_grlalpha(self.max_grlalpha, self.epoch_detail,
+        #                             len(self.adv_schedule))
+        curr_grlalpha = self.max_grlalpha
+
         loss_asr, loss_adv = self.model(*x, grlalpha=curr_grlalpha)
 
         if adv_mode == 'spk':
